@@ -1,0 +1,64 @@
+# =============================================================================
+# WOOWTECH / Woow_podman_litellm
+# =============================================================================
+# Anything that could contain a credential, a database dump, or host-local
+# state must never reach the repository.
+
+# --- secrets -----------------------------------------------------------------
+# The real environment files. Only the *.example templates are tracked.
+.env
+.env.*
+!.env.example
+!.env.quadlet.example
+*.env
+!*.env.example
+secrets/
+*.key
+*.pem
+
+# --- persistent data ---------------------------------------------------------
+# Bind-mount variants and anything a container may have written locally.
+data/
+pgdata/
+
+# --- backups and dumps -------------------------------------------------------
+# A pg_dump of this database contains every virtual key row and every encrypted
+# provider credential. Never commit one.
+backups/
+*.sql
+*.sql.gz
+*.dump
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# --- logs --------------------------------------------------------------------
+*.log
+logs/
+
+# --- OS files ----------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# --- editors / IDEs ----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.kate-swp
+.netrwhist
+
+# --- misc --------------------------------------------------------------------
+*.bak
+*.orig
+*.rej
+tmp/
+.tmp/

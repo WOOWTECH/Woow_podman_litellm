@@ -1,0 +1,93 @@
+# =============================================================================
+# LiteLLM Proxy - SHARED config
+# Used by BOTH docker-compose (mounted at /app/config.yaml) and k8s
+# (mounted via ConfigMap at /etc/litellm/config.yaml).
+#
+# Provider strategy: ALL models are routed through OpenRouter using the
+# `openrouter/<provider>/<model>` slug form. The OpenRouter API key is ALWAYS
+# read from the environment (os.environ/OPENROUTER_API_KEY) and is NEVER
+# hardcoded in this file. The same rule applies to the master key and the
+# database URL.
+#
+# LiteLLM version: v1.83.14  (image ghcr.io/berriai/litellm:v1.83.14-stable)
+# =============================================================================
+
+model_list:
+  # ---------------------------------------------------------------------------
+  # OpenRouter-backed models (public model names -> verified OpenRouter slugs)
+  # ---------------------------------------------------------------------------
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openrouter/openai/gpt-4o-mini
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  - model_name: glm-4.6
+    litellm_params:
+      model: openrouter/z-ai/glm-4.6
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  - model_name: minimax-m2
+    litellm_params:
+      model: openrouter/minimax/minimax-m2
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  # --- extra popular OpenRouter models (optional convenience) ----------------
+  # OpenRouter retired the bare `anthropic/claude-3.5-sonnet` slug: it answers
+  # 404 {"error":{"message":"No endpoints found for anthropic/claude-3.5-sonnet"}},
+  # so the deployment failed every /health probe AND every real request. It is
+  # repointed here at a slug OpenRouter currently serves, and the public
+  # model_name is renamed to match so the catalogue does not lie about what it
+  # routes to. Before adding or renaming any anthropic/* entry, check the slug
+  # against `GET https://openrouter.ai/api/v1/models` - OpenRouter retires the
+  # bare dated slugs as models age out.
+  - model_name: claude-sonnet-4.5
+    litellm_params:
+      model: openrouter/anthropic/claude-sonnet-4.5
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  - model_name: llama-3.3-70b
+    litellm_params:
+      model: openrouter/meta-llama/llama-3.3-70b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      api_base: https://openrouter.ai/api/v1
+
+  # ---------------------------------------------------------------------------
+  # LEGACY / FUTURE USE: direct-provider entries (kept commented on purpose).
+  # Uncomment and supply the matching provider key env vars if you ever want to
+  # bypass OpenRouter and call providers directly. Current strategy = all via
+  # OpenRouter, so these stay disabled.
+  # ---------------------------------------------------------------------------
+  # - model_name: gpt-4o-mini-direct
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_key: os.environ/OPENAI_API_KEY
+  #
+  # - model_name: claude-3.5-sonnet-direct
+  #   litellm_params:
+  #     model: anthropic/claude-3-5-sonnet-latest
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+  #
+  # - model_name: glm-4.6-direct
+  #   litellm_params:
+  #     model: zhipu/glm-4.6
+  #     api_key: os.environ/ZHIPUAI_API_KEY
+
+# =============================================================================
+# General settings - master key, DB, model persistence.
+# Real values come from the environment / k8s Secret, never from this file.
+# =============================================================================
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: true
+
+# =============================================================================
+# LiteLLM behavioural settings for a multi-model gateway.
+# =============================================================================
+litellm_settings:
+  drop_params: true          # silently drop provider-unsupported params
+  request_timeout: 600       # generous upstream timeout (seconds)
