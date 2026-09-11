@@ -42,7 +42,8 @@ There is a fourth, smaller reason that turned out to matter: **the k3s manifests
 
 - **No cloudflared.** `k8s/05-cloudflared.yaml` runs a `cloudflare/cloudflared:latest` connector using a `TUNNEL_TOKEN` from the `cloudflared-token` Secret, and its own header states that it **reuses the existing tunnel**. A Cloudflare tunnel token identifies a tunnel, not a connector; starting a second connector with the same token adds another origin to the *same* tunnel, and Cloudflare will then load-balance across both. Half of the production traffic would arrive at a homelab box. This repo therefore ships no cloudflared container, no service, and no token field anywhere. External access is documentation only — reverse proxy, Tailscale, or a deliberate port exposure — with an explicit warning never to reuse the k3s tunnel token.
 - **No `podman kube play` manifest.** Section 2 explains why at length.
-- **No claim of live verification.** Nothing here was executed against a real Podman host. Where a construct depends on a Podman version boundary, the boundary is named so you can check it yourself.
+- **No compose file any more.** Section 2.1 still records why podman-compose was evaluated and shipped originally; it was removed in the Quadlet-first conversion because on the fleet's podman-compose 1.0.6 the health gate is silently dropped, `restart: unless-stopped` is not recovered at boot, and both paths used the same container names, so a Quadlet start with `podman run --replace` could delete a compose container and come up on an empty volume. The last commit that ships it is tagged `compose-final`.
+- **No claim of live verification.** Nothing here has been executed against a real Podman host yet. Where a construct depends on a Podman version boundary, the boundary is named so you can check it yourself.
 
 ---
 
@@ -92,15 +93,15 @@ Podman offers three genuinely different ways to run a multi-container stack. The
 
 - *No extra dependency at all.* If you have a recent Podman, you have Quadlet.
 - *Real systemd supervision.* `systemctl --user status litellm`, `journalctl --user -u litellm`, `Restart=`, `RestartSec=`, `StartLimitIntervalSec=`/`StartLimitBurst=`, `TimeoutStartSec=`, `TimeoutStopSec=` — all of it is standard and all of it composes with the rest of the machine's units.
-- *Boots with the machine, properly.* `[Install] WantedBy=default.target multi-user.target` plus `loginctl enable-linger $USER` for rootless.
+- *Boots with the machine, properly.* `[Install] WantedBy=default.target` plus `loginctl enable-linger $USER` for rootless (`multi-user.target` does not exist in the user manager, so listing it there is a no-op at best).
 - *Automatic dependency injection.* Because `litellm-postgres.container` says `Network=litellm.network` and `Volume=litellm-pgdata.volume:/var/lib/postgresql/data`, Quadlet emits `Requires=` and `After=` on the corresponding generated units by itself. Hand-writing them is unnecessary and error-prone.
-- *`Notify=healthy`.* On Podman 5.0+, this makes the generated unit `Type=notify` and withholds the systemd READY notification until the container's healthcheck passes. A downstream unit ordered `After=` it therefore gets a genuine health gate. This is the single most valuable thing Quadlet offers this stack and it is strictly better than what the k3s manifest does (see §5.2).
+- *A real health gate.* `Notify=healthy` promises this on Podman 5.0+, but **4.9.3 accepts the key and ignores it** (the generated unit gets `--sdnotify=conmon`), so this stack does it with an `ExecStartPost=` readiness loop on the database unit instead: systemd keeps the unit `activating` until `pg_isready` succeeds over TCP, and every dependent ordered `After=` it gets a genuine gate. Strictly better than what the k3s manifest does (see §5.2).
 - *A dry-run validator.* `QUADLET_UNIT_DIRS=<dir> /usr/lib/systemd/system-generators/podman-system-generator --user --dryrun` prints the units that would be generated, without touching the system.
 
 **What it costs.**
 
 - *A new file format to learn*, and one with a nasty failure mode: **an unrecognised key makes Quadlet silently skip the file entirely.** You do not get a parse error; you get `Unit litellm.service not found` at `systemctl start` time. The dry-run above is the only reliable way to catch this.
-- *Version sensitivity.* `Notify=healthy` needs Podman 5.0+; `Memory=` as a native `[Container]` key needs 5.5.0+; there is no `[Container]` CPU key at all, so `PodmanArgs=--cpus=` is mandatory. This repo uses `PodmanArgs=--memory=1g` / `--cpus=1.0` for exactly this portability reason.
+- *Version sensitivity.* `Notify=healthy` needs Podman 5.0+ (and is ignored, not rejected, below that); `Memory=` as a native `[Container]` key needs 5.5.0+; `StopTimeout=` is 5.x only; there is no `[Container]` CPU key at all, so `PodmanArgs=--cpus=` is mandatory. This repo uses `PodmanArgs=--memory=1g --cpus=1.0` for exactly this portability reason, and validates every unit against the 4.9.3 generator in CI.
 - *Sharp edges around defaults.* Quadlet does **not** emit `Restart=` for `.container` units, so a unit without an explicit `[Service] Restart=` inherits systemd's default of `Restart=no` and a crashed container simply stays down. Every `.container` in this repo hand-writes `Restart=always` and `RestartSec=10`.
 - *You cannot `systemctl enable` a Quadlet unit.* The generated services are transient. Enablement is expressed only through `[Install]`, applied by the generator at daemon-reload.
 - *Rootless prerequisites.* cgroup v2 is required. The `cpu` and `cpuset` controllers are not delegated to user slices by default, so `--cpus` can be silently ineffective until you add `Delegate=memory pids cpu cpuset` via `/etc/systemd/system/user@.service.d/delegate.conf`.
@@ -138,7 +139,7 @@ Podman offers three genuinely different ways to run a multi-container stack. The
 | Lifecycle owner | The CLI tool / engine restart policy | **systemd** | One-shot apply (or one `.kube` unit) |
 | Starts at boot | Only via a hand-written wrapper unit | **Native (`[Install]` + linger)** | Via a `.kube` unit |
 | Per-container `systemctl` / journal | No | **Yes** | No — one unit for the whole manifest |
-| Health-gated ordering | `condition: service_healthy` (Podman ≥ 4.6, podman-compose ≥ 1.3) | **`Notify=healthy` (Podman 5.0+)**, or the shipped wait unit | Probe fields partially honoured |
+| Health-gated ordering | `condition: service_healthy` (Podman ≥ 4.6, podman-compose ≥ 1.3; dropped by 1.0.6) | **`ExecStartPost=` readiness loop** on the database unit (works on every version; `Notify=healthy` is ignored by 4.9.3) | Probe fields partially honoured |
 | Fails loudly on a missing secret | **Yes (`${VAR:?msg}`)** | No (env file is read as-is) | No |
 | Fails loudly on an unsupported field | Mostly yes | **No — silently skips the whole file** | **No — silently ignores the field** |
 | Reconciliation / drift correction | None | None (systemd restarts, does not reconcile) | None |
@@ -148,11 +149,11 @@ Podman offers three genuinely different ways to run a multi-container stack. The
 | Resource limits | `mem_limit` / `cpus` | `PodmanArgs=--memory` / `--cpus` | `limits` honoured, `requests` dropped |
 | Best at | Portability, team familiarity, Portainer | Production single-node, boot-time, supervision | Throwaway local repro of a cluster workload |
 
-### 2.5 Why this repo ships the first two and not the third
+### 2.5 Why this repo ships Quadlet only
 
-**Compose is shipped because it is the low-friction path.** It matches four sibling repositories, it drops into Portainer, and every operator here can already read it. For a homelab or a developer box it is the right default, and its `${VAR:?}` guards catch the single most common deployment mistake — a missing key — before a container ever starts.
+**Compose was shipped first, and is no longer.** It was the low-friction path: it matched four sibling repositories, it dropped into Portainer, and its `${VAR:?}` guards caught a missing key before a container started. What ended it is the fidelity gap in §2.1 measured against the version actually installed on the WOOWTECH hosts, podman-compose **1.0.6**: `depends_on: condition: service_healthy` is dropped there, so the proxy races the database; `restart: unless-stopped` is not recovered at boot; and the two paths shared container names, so `podman run --replace` from a Quadlet start could delete a compose container and bring the stack up on an empty volume. Two paths that can destroy each other's data are not worth the convenience of one of them.
 
-**Quadlet is shipped because it is the correct production answer on a single node.** It is part of Podman, it makes systemd the supervisor rather than bolting a supervisor on top, it survives reboots by design, and `Notify=healthy` gives a health gate that is strictly stronger than the k3s manifest's own `nc -z` init container.
+**Quadlet is shipped because it is the correct production answer on a single node.** It is part of Podman, it makes systemd the supervisor rather than bolting a supervisor on top, and it survives reboots by design. The health gate is not `Notify=healthy` — podman 4.9.3 accepts that key and ignores it — but an `ExecStartPost=` loop on the database unit that keeps it `activating` until `pg_isready` succeeds over TCP, which is strictly stronger than the k3s manifest's own `nc -z` init container and gates every dependent automatically.
 
 **`podman kube play` is not shipped, and the reason is not that it is a bad tool.** It is a good tool aimed at a different problem. The objection is specific: for *this* manifest set, the fields it would silently drop are the fields that encode the operational intent. `maxUnavailable: 0` is the whole point of the rolling-update strategy. `volumeClaimTemplates` + `local-path` is the whole point of the StatefulSet. The headless Service is what makes `litellm-postgres` resolve. `resources.requests` are what make the workload schedulable. Shipping a file that appears to preserve all of that while preserving none of it would be worse than shipping nothing, because it would look right. Add the absence of reconciliation — which removes the only thing that made the declarative model worth its verbosity — and the weaker systemd integration, and the case closes. If you want the k3s YAML to keep meaning what it says, keep it on k3s. If you want a single-node deployment, write single-node artefacts that are honest about being single-node.
 
@@ -164,111 +165,111 @@ Every construct in `k8s/00-namespace.yaml` through `k8s/05-cloudflared.yaml`. "�
 
 ### 3.1 Cluster-level and structural
 
-| Kubernetes construct | podman-compose (`docker-compose.yml`) | Quadlet (`quadlet/`) |
-|---|---|---|
-| `kind: Namespace` (`litellm`) | Compose project name (Portainer-derived; no top-level `name:` key) | — (no namespace concept; unit filenames and the `litellm-` prefix provide the grouping) |
-| Namespace labels `app.kubernetes.io/name`, `app.kubernetes.io/part-of` | `labels:` on services | `Label=app.kubernetes.io/part-of=woow-litellm`, `Label=io.woowtech.stack=litellm-gw` |
-| `kind: Deployment` (`litellm`) | `services: litellm:` | `quadlet/litellm.container` → `litellm.service` |
-| `kind: StatefulSet` (`litellm-postgres`) | `services: postgres:` (`container_name: litellm-postgres`) | `quadlet/litellm-postgres.container` → `litellm-postgres.service` |
-| `replicas: 1` | One container per service (implicit) | One container per unit (implicit) |
-| `strategy: RollingUpdate`, `maxUnavailable: 0`, `maxSurge: 1` | — | — |
-| `serviceName: litellm-postgres` (StatefulSet governing Service) | `container_name` + network alias | `ContainerName=litellm-postgres` + `PodmanArgs=--network-alias=postgres` |
-| `selector` / `matchLabels` / pod template labels | — (no controller to select with; `labels:` are metadata only) | — (`Label=` is metadata only) |
-| Pod (shared network namespace) | Not used — two independent containers on one bridge network | Not used — could be a `.pod`, deliberately not, so each container is separately supervisable |
-| `kind: Service` type `ClusterIP` (`litellm`, port 4000) | `ports: "${LITELLM_PORT:-4000}:4000"` | `PublishPort=127.0.0.1:4000:4000` |
-| `kind: Service` headless (`clusterIP: None`, postgres) | Bridge-network DNS: aliases `[litellm-postgres, postgres]`, `expose: "5432"`, no `ports:` | aardvark-dns on `litellm-net`: `ContainerName=litellm-postgres` + `PodmanArgs=--network-alias=postgres`, no `PublishPort=` |
-| Cluster DNS (`kube-dns` / CoreDNS) | netavark + aardvark-dns on a user-defined bridge | netavark + aardvark-dns on `litellm-net` |
-| Default `podman` network | n/a — Compose always creates a project network | Not used. The built-in `podman` network provides **no DNS**, so a user-defined network is mandatory for `litellm-postgres` to resolve |
-| `kind: Ingress` / external exposure | Not present in the manifests; documentation only | Not present; documentation only |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| `kind: Namespace` (`litellm`) | — (no namespace concept; unit filenames and the `litellm-` prefix provide the grouping) |
+| Namespace labels `app.kubernetes.io/name`, `app.kubernetes.io/part-of` | `Label=app.kubernetes.io/part-of=woow-litellm`, `Label=io.woowtech.stack=litellm-gw` |
+| `kind: Deployment` (`litellm`) | `quadlet/litellm.container` → `litellm.service` |
+| `kind: StatefulSet` (`litellm-postgres`) | `quadlet/litellm-postgres.container` → `litellm-postgres.service` |
+| `replicas: 1` | One container per unit (implicit) |
+| `strategy: RollingUpdate`, `maxUnavailable: 0`, `maxSurge: 1` | — |
+| `serviceName: litellm-postgres` (StatefulSet governing Service) | `ContainerName=litellm-postgres` (aardvark-dns resolves the container name) |
+| `selector` / `matchLabels` / pod template labels | — (`Label=` is metadata only) |
+| Pod (shared network namespace) | Not used — could be a `.pod`, deliberately not, so each container is separately supervisable |
+| `kind: Service` type `ClusterIP` (`litellm`, port 4000) | `PublishPort=` rendered from `litellm.env`, default `127.0.0.1:4000:4000` |
+| `kind: Service` headless (`clusterIP: None`, postgres) | aardvark-dns on `litellm-net`: `ContainerName=litellm-postgres`, no `PublishPort=` |
+| Cluster DNS (`kube-dns` / CoreDNS) | netavark + aardvark-dns on `litellm-net` |
+| Default `podman` network | Not used. The built-in `podman` network provides **no DNS**, so a user-defined network is mandatory for `litellm-postgres` to resolve |
+| `kind: Ingress` / external exposure | Not present; documentation only |
 
 ### 3.2 Configuration and secrets
 
-| Kubernetes construct | podman-compose | Quadlet |
-|---|---|---|
-| `kind: ConfigMap` (`litellm-config`, embedded copy of config.yaml) | Bind mount `./config/config.yaml:/app/config.yaml:ro,Z` — no copy, no drift | `Volume=%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z` (installed by `install.sh`) |
-| ConfigMap `items: [{key: config.yaml, path: config.yaml}]` (single-key projection) | Single-file bind mount achieves the same result | Single-file bind mount achieves the same result |
-| `kind: Secret` (Opaque, `litellm-secrets`) | `${VAR:?}` interpolation, resolved on the host from `.env` (CLI) or Portainer's `stack.env`; no `env_file:` is declared | `EnvironmentFile=%h/.config/litellm/litellm.env` (mode `0600`, dir `0700`, outside the git tree) |
-| `kind: Secret` (`litellm-postgres-secret`) | Same interpolation source | Same env file (a note in the unit explains how to split into `postgres.env` / `litellm.env`, since `EnvironmentFile=` is repeatable and order-preserving) |
-| `kind: Secret` (`cloudflared-token`) | **Deliberately absent** | **Deliberately absent** |
-| `envFrom: secretRef` | No direct analogue — each key is listed explicitly in `environment:` and filled by `${VAR:?}` interpolation from `.env` / `stack.env`. `env_file:` is deliberately **not** used, because it would hard-fail Portainer git deploys (no `.env` in the cloned tree) | `EnvironmentFile=` |
-| `env:` with literal `value:` | `environment:` map | `Environment=KEY=VALUE` (repeatable) |
-| `env:` with `valueFrom.secretKeyRef` | `${VAR}` interpolation from `.env` | — (no per-key secret indirection; the whole env file is loaded) |
-| Secret base64 encoding | Plain `KEY=VALUE` | Plain `KEY=VALUE`. **No `${VAR}`, `${VAR:-x}`, `${VAR:?}`, `$(...)`, `export`, or trailing comments** — systemd's `EnvironmentFile` parser is not a shell |
-| Missing-value behaviour | **Hard fail** via `${OPENROUTER_API_KEY:?...}` etc. | Silent empty value — the container starts and fails later. This is a real regression; the smoke test exists partly to catch it |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| `kind: ConfigMap` (`litellm-config`, embedded copy of config.yaml) | `Volume=%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z` (installed by `install.sh`) |
+| ConfigMap `items: [{key: config.yaml, path: config.yaml}]` (single-key projection) | Single-file bind mount achieves the same result |
+| `kind: Secret` (Opaque, `litellm-secrets`) | podman secrets `litellm-master-key`, `litellm-salt-key`, `litellm-openrouter-api-key` (`Secret=...,type=env`), created by `scripts/install.sh` from `~/.config/litellm/litellm.env` (0600, outside the git tree) |
+| `kind: Secret` (`litellm-postgres-secret`) | podman secret `litellm-postgres-password` as a **file** (`type=mount` + `POSTGRES_PASSWORD_FILE`), plus the derived `litellm-database-url`. The database container never sees the proxy's keys |
+| `kind: Secret` (`cloudflared-token`) | **Deliberately absent** |
+| `envFrom: secretRef` | `Secret=<name>,type=env,target=<VAR>` (one line per credential) |
+| `env:` with literal `value:` | `Environment=KEY=VALUE` (repeatable) |
+| `env:` with `valueFrom.secretKeyRef` | `Secret=...,target=VAR` is exactly that indirection |
+| Secret base64 encoding | Plain bytes in the podman secret store (`~/.local/share/containers/storage`), never base64 |
+| Missing-value behaviour | `scripts/install.sh` refuses to install without an OpenRouter key, and a missing secret makes the unit fail loudly at start (`Error: secret ... not found`) |
 
 ### 3.3 Storage
 
-| Kubernetes construct | podman-compose | Quadlet |
-|---|---|---|
-| `volumeClaimTemplates` (`pgdata`) | Named volume `pgdata` (`driver: local`) | `quadlet/litellm-pgdata.volume` → `litellm-pgdata-volume.service`, `VolumeName=litellm-pgdata` |
-| `accessModes: [ReadWriteOnce]` | — (single host; implicitly RWO) | — |
-| `storageClassName: local-path` | `driver: local` | `Driver=local` |
-| `resources.requests.storage: 5Gi` | — (no quota; the volume grows into the host filesystem) | — (same) |
-| `volumeMounts` → `/var/lib/postgresql/data` | `pgdata:/var/lib/postgresql/data` | `Volume=litellm-pgdata.volume:/var/lib/postgresql/data` |
-| ConfigMap volume → `/etc/litellm` (`readOnly: true`) | `./config/config.yaml:/app/config.yaml:ro,Z` | `%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z` |
-| `PGDATA=/var/lib/postgresql/data/pgdata` (subdir so the mount root can hold `lost+found`) | Identical `PGDATA` value | Identical `Environment=PGDATA=/var/lib/postgresql/data/pgdata` |
-| SELinux relabelling | `:Z` (private label) | `:Z` (private label). `:z` is the shared variant — do not use it on a host-shared directory you care about |
-| Volume dependency ordering | `volumes:` top-level block, created before services | Referencing `litellm-pgdata.volume` by **filename** makes Quadlet inject `Requires=`+`After=litellm-pgdata-volume.service` automatically |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| `volumeClaimTemplates` (`pgdata`) | `quadlet/litellm-pgdata.volume` → `litellm-pgdata-volume.service`, `VolumeName=litellm-pgdata` |
+| `accessModes: [ReadWriteOnce]` | — |
+| `storageClassName: local-path` | `Driver=local` |
+| `resources.requests.storage: 5Gi` | — (same) |
+| `volumeMounts` → `/var/lib/postgresql/data` | `Volume=litellm-pgdata.volume:/var/lib/postgresql/data` |
+| ConfigMap volume → `/etc/litellm` (`readOnly: true`) | `%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z` |
+| `PGDATA=/var/lib/postgresql/data/pgdata` (subdir so the mount root can hold `lost+found`) | Identical `Environment=PGDATA=/var/lib/postgresql/data/pgdata` |
+| SELinux relabelling | `:Z` (private label). `:z` is the shared variant — do not use it on a host-shared directory you care about |
+| Volume dependency ordering | Referencing `litellm-pgdata.volume` by **filename** makes Quadlet inject `Requires=`+`After=litellm-pgdata-volume.service` automatically |
 
 ### 3.4 Networking
 
-| Kubernetes construct | podman-compose | Quadlet |
-|---|---|---|
-| Pod network / CNI (flannel) | `networks: litellm-network: driver: bridge` | `quadlet/litellm.network` (`NetworkName=litellm-net`, `Driver=bridge`) → `litellm-network.service` |
-| Service DNS name `litellm-postgres` | Network alias `litellm-postgres` | `ContainerName=litellm-postgres` (aardvark-dns resolves the container name) |
-| Legacy plain-compose hostname `postgres` | Network alias `postgres` | `PodmanArgs=--network-alias=postgres` (the native `NetworkAlias=` key exists only in Podman 5.2+, and an unknown key makes Quadlet skip the whole unit) |
-| `containerPort: 4000` | `ports: "${LITELLM_PORT:-4000}:4000"` (all interfaces; a loopback-only alternative is commented in the file) | `PublishPort=127.0.0.1:4000:4000` (loopback only) |
-| Postgres `port: 5432`, ClusterIP-internal only | `expose: ["5432"]`, **no `ports:`** | **No `PublishPort=`** |
-| `NetworkPolicy` | — (not present in the manifests, and not expressible) | — |
-| Subnet control | Docker/Podman default pool | Commented `#Subnet=10.89.42.0/24` / `#Gateway=10.89.42.1` in `litellm.network` |
-| Network dependency ordering | Implicit in the Compose project | Referencing `litellm.network` by **filename** injects `Requires=`+`After=` on the generated network unit automatically |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| Pod network / CNI (flannel) | `quadlet/litellm.network` (`NetworkName=litellm-net`, `Driver=bridge`) → `litellm-network.service` |
+| Service DNS name `litellm-postgres` | `ContainerName=litellm-postgres` (aardvark-dns resolves the container name) |
+| Legacy plain-compose hostname `postgres` | Dropped with compose: `DATABASE_URL` uses the container name `litellm-postgres`, which aardvark-dns resolves |
+| `containerPort: 4000` | `PublishPort=` rendered from `litellm.env` (loopback only by default) |
+| Postgres `port: 5432`, ClusterIP-internal only | **No `PublishPort=`** |
+| `NetworkPolicy` | — |
+| Subnet control | Commented `#Subnet=10.89.42.0/24` / `#Gateway=10.89.42.1` in `litellm.network` |
+| Network dependency ordering | Referencing `litellm.network` by **filename** injects `Requires=`+`After=` on the generated network unit automatically |
 
 ### 3.5 Container runtime specification
 
-| Kubernetes construct | podman-compose | Quadlet |
-|---|---|---|
-| `image: ghcr.io/berriai/litellm:v1.83.14-stable` | Same fully-qualified reference | `Image=ghcr.io/berriai/litellm:v1.83.14-stable` |
-| `image: postgres:16-alpine` (short name) | Expanded to `docker.io/library/postgres:16-alpine` | `Image=docker.io/library/postgres:16-alpine` — short names depend on `registries.conf` search order and can prompt interactively, which fails in a non-interactive unit |
-| `imagePullPolicy: IfNotPresent` | Default `podman` behaviour | Deliberately no `Pull=` key — `podman run` already defaults to `--pull=missing`, which is the same semantics, and omitting the key keeps the file parseable on older Podman |
-| Image digest pinning | Not shipped | Commented `#Image=...@sha256:PASTE_DIGEST_HERE` with the two commands to obtain it. No digest is shipped because none was pulled or verified while writing this repo |
-| `args: ["--config","/etc/litellm/config.yaml","--port","4000"]` | `command: ["--config","/app/config.yaml","--port","4000"]` | `Exec=--config /app/config.yaml --port 4000` |
-| `command:` (ENTRYPOINT override) | Deliberately unset | Deliberately unset (`Entrypoint=` absent). The image ENTRYPOINT is `docker/prod_entrypoint.sh`, ending in `exec litellm "$@"`, so args must **never** be prefixed with the word `litellm` |
-| `resources.limits.cpu` | `cpus: 1.0` / `cpus: 2.0` | `PodmanArgs=--cpus=1.0` / `--cpus=2.0` — there is **no `[Container]` CPU key** |
-| `resources.limits.memory` | `mem_limit: 1g` / `mem_limit: 2g` | `PodmanArgs=--memory=1g` / `--memory=2g`; the native `Memory=` key exists only from Podman 5.5.0 |
-| `resources.requests.*` | — | — (scheduler hints; meaningless on one host) |
-| `securityContext` | Not set in the manifests | Not enabled, but `#NoNewPrivileges=true`, `#DropCapability=ALL`, `#AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID` are documented and commented out because they were never live-tested |
-| Read-only root filesystem | Not set | `#ReadOnly=true` commented, with a note that it needs `LITELLM_MIGRATION_DIR`, `LITELLM_UI_PATH` and `LITELLM_ASSETS_PATH` redirected first |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| `image: ghcr.io/berriai/litellm:v1.83.14-stable` | `Image=ghcr.io/berriai/litellm:v1.83.14-stable` |
+| `image: postgres:16-alpine` (short name, moving) | `Image=docker.io/library/postgres:16.15-alpine3.24` — fully qualified (short names depend on the `registries.conf` search order and can prompt interactively, which fails in a non-interactive unit) and pinned to an exact version |
+| `imagePullPolicy: IfNotPresent` | Deliberately no `Pull=` key — `podman run` already defaults to `--pull=missing`, which is the same semantics, and omitting the key keeps the file parseable on older Podman |
+| Image digest pinning | Commented `#Image=...@sha256:PASTE_DIGEST_HERE` with the two commands to obtain it. No digest is shipped because none was pulled or verified while writing this repo |
+| `args: ["--config","/etc/litellm/config.yaml","--port","4000"]` | `Exec=--config /app/config.yaml --port 4000` |
+| `command:` (ENTRYPOINT override) | Deliberately unset (`Entrypoint=` absent). The image ENTRYPOINT is `docker/prod_entrypoint.sh`, ending in `exec litellm "$@"`, so args must **never** be prefixed with the word `litellm` |
+| `resources.limits.cpu` | `PodmanArgs=--cpus=1.0` / `--cpus=2.0` — there is **no `[Container]` CPU key** |
+| `resources.limits.memory` | `PodmanArgs=--memory=1g` / `--memory=2g`; the native `Memory=` key exists only from Podman 5.5.0 |
+| `resources.requests.*` | — (scheduler hints; meaningless on one host) |
+| `securityContext` | Not enabled, but `#NoNewPrivileges=true`, `#DropCapability=ALL`, `#AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID` are documented and commented out because they were never live-tested |
+| Read-only root filesystem | `#ReadOnly=true` commented, with a note that it needs `LITELLM_MIGRATION_DIR`, `LITELLM_UI_PATH` and `LITELLM_ASSETS_PATH` redirected first |
 
 ### 3.6 Health, ordering and lifecycle
 
-| Kubernetes construct | podman-compose | Quadlet |
-|---|---|---|
-| `initContainer wait-for-postgres` (`busybox:1.36`, `until nc -z litellm-postgres 5432`) | `depends_on: postgres: condition: service_healthy` | **`Notify=healthy`** on `litellm-postgres.container` (Podman 5.0+), plus `quadlet/litellm-wait-postgres.service` as the 4.x fallback |
-| Postgres `readinessProbe` (`pg_isready`, 10/10/5) | `healthcheck: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER:-litellm} -d ${POSTGRES_DB:-litellm}"]`, 10s/5s/5/10s | `HealthCmd=pg_isready -U litellm -d litellm`, `HealthInterval=10s`, `HealthTimeout=5s`, `HealthRetries=3`, `HealthStartPeriod=10s` |
-| Postgres `livenessProbe` (same command, 30/15/5) | Collapsed into the one healthcheck | Collapsed into the one healthcheck (readiness timings kept, because that is the signal the ordering gate uses) |
-| LiteLLM `readinessProbe` → `/health/readiness` (120/15/10/6) | Collapsed into the one healthcheck | **`HealthStartupCmd=`** against `/health/readiness`, `HealthStartupInterval=15s`, `HealthStartupTimeout=10s`, `HealthStartupRetries=40`, `HealthStartupSuccess=1` |
-| LiteLLM `livenessProbe` → `/health/liveliness` (120/20/10/6) | `healthcheck:` python-urllib probe of `/health/liveliness`, 20s/10s/6, `start_period: 120s` | `HealthCmd=` python-urllib probe of `/health/liveliness`, `HealthInterval=20s`, `HealthTimeout=10s`, `HealthRetries=6`, `HealthStartPeriod=120s` |
-| Probe mechanism (`httpGet`, run by the kubelet from outside) | Executed **inside** the container. The image has Python but **no curl**, hence a `python -c "import urllib.request,sys; ..."` one-liner | Same one-liner, same reason |
-| kubelet restart on liveness failure | Engine restart policy | `HealthOnFailure=kill` (the value Podman documents as integrating best with systemd) plus `[Service] Restart=always` |
-| `restartPolicy: Always` | `restart:` semantics | `[Service] Restart=always`, `RestartSec=10`. **Quadlet does not emit `Restart=` itself** — without this line the unit inherits `Restart=no` |
-| CrashLoopBackOff | — | `StartLimitIntervalSec=300`, `StartLimitBurst=5` → the unit lands in `failed`, a visible and alertable state. The closest available analogue |
-| Graceful termination / `terminationGracePeriodSeconds` | Compose stop timeout | `TimeoutStopSec=90` for Postgres (finish a checkpoint rather than be SIGKILLed into crash recovery), `TimeoutStopSec=60` for the proxy |
-| Startup budget for a cold image pull | Compose has no equivalent knob | `TimeoutStartSec=300` (postgres) / `600` (litellm) — systemd's 90s default is shorter than a first-run pull on a slow link, and with `Notify=healthy` the unit stays `activating` until the healthcheck passes |
-| Scheduling at boot | Wrapper unit required | `[Install] WantedBy=default.target multi-user.target` (`default.target` for rootless, `multi-user.target` for rootful; both listed so one file works in either location) + `loginctl enable-linger $USER` |
+| Kubernetes construct | Quadlet (`quadlet/`) |
+|---|---|
+| `initContainer wait-for-postgres` (`busybox:1.36`, `until nc -z litellm-postgres 5432`) | **`ExecStartPost=`** on `litellm-postgres.container`: a bounded `until podman exec ... pg_isready -h 127.0.0.1 ...` loop that keeps the unit `activating` until the database answers over TCP |
+| Postgres `readinessProbe` (`pg_isready`, 10/10/5) | `HealthCmd=pg_isready -h 127.0.0.1 -p 5432 -U litellm -d litellm`, `HealthInterval=10s`, `HealthTimeout=5s`, `HealthRetries=3`, `HealthStartPeriod=60s` |
+| Postgres `livenessProbe` (same command, 30/15/5) | Collapsed into the one healthcheck (readiness timings kept, because that is the signal the ordering gate uses) |
+| LiteLLM `readinessProbe` → `/health/readiness` (120/15/10/6) | **`HealthStartupCmd=`** against `/health/readiness`, `HealthStartupInterval=15s`, `HealthStartupTimeout=10s`, `HealthStartupRetries=40`, `HealthStartupSuccess=1` |
+| LiteLLM `livenessProbe` → `/health/liveliness` (120/20/10/6) | `HealthCmd=` python-urllib probe of `/health/liveliness`, `HealthInterval=20s`, `HealthTimeout=10s`, `HealthRetries=6`, `HealthStartPeriod=120s` |
+| Probe mechanism (`httpGet`, run by the kubelet from outside) | Same one-liner, same reason |
+| kubelet restart on liveness failure | `HealthOnFailure=kill` (the value Podman documents as integrating best with systemd) plus `[Service] Restart=always` |
+| `restartPolicy: Always` | `[Service] Restart=always`, `RestartSec=10`. **Quadlet does not emit `Restart=` itself** — without this line the unit inherits `Restart=no` |
+| CrashLoopBackOff | `StartLimitIntervalSec=300`, `StartLimitBurst=5` → the unit lands in `failed`, a visible and alertable state. The closest available analogue |
+| Graceful termination / `terminationGracePeriodSeconds` | `TimeoutStopSec=90` for Postgres (finish a checkpoint rather than be SIGKILLed into crash recovery), `TimeoutStopSec=60` for the proxy |
+| Startup budget for a cold image pull | `TimeoutStartSec=300` (postgres) / `600` (litellm) — systemd's 90s default is shorter than a first-run pull on a slow link; `scripts/install.sh` also pre-pulls both images so the pull happens outside the unit's start window |
+| Scheduling at boot | `[Install] WantedBy=default.target` + `loginctl enable-linger $USER` (the user manager has no `multi-user.target`; a rootful install uses its own copy of the units) |
 
 ### 3.7 Application-level environment
 
-| Kubernetes value | podman-compose | Quadlet |
-|---|---|---|
-| `STORE_MODEL_IN_DB: "True"` | `environment:` | `Environment=STORE_MODEL_IN_DB=True` |
-| `LITELLM_MODE: "PRODUCTION"` | `environment:` | `Environment=LITELLM_MODE=PRODUCTION` |
-| `LITELLM_LOG: "INFO"` | `environment:` | `Environment=LITELLM_LOG=INFO` |
-| `DISABLE_SCHEMA_UPDATE: "true"` | `${DISABLE_SCHEMA_UPDATE:-false}` — **deliberately inverted**, see §5.1 | `Environment=DISABLE_SCHEMA_UPDATE=false` — same inversion |
-| `DATABASE_URL` (from Secret) | `${DATABASE_URL:?}` | From the env file |
-| `LITELLM_MASTER_KEY` (from Secret) | `${LITELLM_MASTER_KEY:?}` | From the env file |
-| `LITELLM_SALT_KEY` (Secret, commented `SET ONCE, NEVER CHANGE`) | `${LITELLM_SALT_KEY:?}` | From the env file, with the same warning |
-| `OPENROUTER_API_KEY` (from Secret) | `${OPENROUTER_API_KEY:?}` | From the env file |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `${POSTGRES_PASSWORD:?...}` etc. | From the env file |
+| Kubernetes value | Quadlet (`quadlet/`) |
+|---|---|
+| `STORE_MODEL_IN_DB: "True"` | `Environment=STORE_MODEL_IN_DB=True` |
+| `LITELLM_MODE: "PRODUCTION"` | `Environment=LITELLM_MODE=PRODUCTION` |
+| `LITELLM_LOG: "INFO"` | `Environment=LITELLM_LOG=INFO` |
+| `DISABLE_SCHEMA_UPDATE: "true"` | `Environment=DISABLE_SCHEMA_UPDATE=false` — same inversion |
+| `DATABASE_URL` (from Secret) | From the env file |
+| `LITELLM_MASTER_KEY` (from Secret) | From the env file |
+| `LITELLM_SALT_KEY` (Secret, commented `SET ONCE, NEVER CHANGE`) | From the env file, with the same warning |
+| `OPENROUTER_API_KEY` (from Secret) | From the env file |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `Environment=` for the user and database; the password only as `POSTGRES_PASSWORD_FILE` from a podman secret |
 
 > **`LITELLM_SALT_KEY` — set once, never rotate.** It is the key used to encrypt provider credentials stored in the database. If it is unset, LiteLLM silently falls back to `LITELLM_MASTER_KEY`, which means rotating the master key would then also destroy decryptability. Worse, a decryption failure is **non-blocking**: LiteLLM logs `Did your master_key/salt key change recently?` and returns `None`, so the proxy keeps running while quietly failing to read its own credentials. Rotate it and every credential encrypted in the database becomes permanently undecryptable. This is also why `scripts/backup.sh` warns that a `pg_dump` is ciphertext and useless without the salt key.
 
@@ -306,7 +307,7 @@ Seven things genuinely do not translate. For each: what Kubernetes gives you, wh
 
 **Podman cannot:** notice that a running container no longer matches its unit file, or that someone `podman rm`'d a volume, or that the image tag moved. There is no controller and no desired-state comparison. Editing a `.container` file changes nothing until `systemctl --user daemon-reload` followed by a restart.
 
-**Mitigation adopted:** make the state explicit and checkable instead of self-correcting. `install.sh` and `uninstall.sh` are the apply/delete operations. `scripts/smoke-test.sh` runs seven counted checks (HTTP through the container's own Python, SQL through the postgres container's `psql`) so drift is *detected* even though it is not *corrected*. `StartLimitIntervalSec=`/`StartLimitBurst=` turn a persistently broken container into a `failed` unit that monitoring can see, rather than an infinite silent restart loop.
+**Mitigation adopted:** make the state explicit and checkable instead of self-correcting. `scripts/install.sh` and `scripts/uninstall.sh` are the apply/delete operations, and the install is change-aware: it rewrites only what differs and restarts only those units. `tests/smoke.sh` runs counted checks (HTTP through the container's own Python, SQL through the postgres container's `psql`) so drift is *detected* even though it is not *corrected*. `StartLimitIntervalSec=`/`StartLimitBurst=` turn a persistently broken container into a `failed` unit that monitoring can see, rather than an infinite silent restart loop.
 
 ### 4.3 A real secret store
 
@@ -316,7 +317,7 @@ Seven things genuinely do not translate. For each: what Kubernetes gives you, wh
 
 **Podman cannot:** give you per-key indirection into an env file, encryption at rest without extra machinery, or any access control finer than Unix file permissions. `podman secret` in its default driver stores secrets unencrypted under the user's data directory, so it moves the problem rather than solving it.
 
-**Mitigation adopted:** a single `0600` file in a `0700` directory, owned by the service user, living **outside the git tree** (`~/.config/litellm/litellm.env` for Quadlet; `.env` for compose, with `.gitignore` blocking `.env`, `.env.*`, `*.env`, `secrets/`, `*.key` and `*.pem` while allowing only `*.example` templates). Compose additionally gets `${VAR:?message}` guards that refuse to start on a missing secret; the Quadlet path has no equivalent and is documented as weaker on that specific point. Both paths deliberately avoid publishing the Postgres port, so the encrypted-credential store is not reachable from the host network at all. The env file format rules are strict for a reason — systemd's parser is not a shell, so `${VAR}`, `${VAR:-x}`, `$(...)`, `export` and trailing comments on value lines are all forbidden, and passwords should avoid `$` and `#` entirely (hex is suggested).
+**Mitigation adopted:** podman secrets, created by `scripts/install.sh` and never written into a unit, a log or the repo. The operator's own key enters through a single `0600` file in a `0700` directory outside the git tree (`~/.config/litellm/litellm.env`) and can be blanked once installed; `.gitignore` blocks `.env`, `.env.*` and `*.env` except the example and the dry-run fixtures, and CI greps for credential-shaped strings. The database password is a *file* secret, so it is not even in `podman inspect`; the other four are env secrets, which on podman 4.9.3 **are** visible there to anyone who can use this user's podman socket. The Postgres port is never published, so the encrypted-credential store is not reachable from the host network at all.
 
 ### 4.4 The three-probe model
 
@@ -392,12 +393,12 @@ The repo ships `false` because it is the value that makes a clean install work o
 **What is used instead, in three layers:**
 
 1. **Compose:** `depends_on: postgres: condition: service_healthy`, gated on the `pg_isready` healthcheck. Requires Podman ≥ 4.6 (for `podman wait --condition=healthy`) and podman-compose ≥ 1.3; on older versions this silently degrades to ordering only, which is exactly the race being avoided. Check your versions.
-2. **Quadlet, Podman 5.0+:** `Notify=healthy` on `litellm-postgres.container`. Podman withholds the systemd READY notification until `pg_isready` passes, so `litellm-postgres.service` reports `active` only when the database genuinely answers. `litellm.container`'s `After=litellm-postgres.service` then gets a real health gate for free — no side-car, no extra image, no TCP-only race. This is strictly better than the k3s original.
-3. **Quadlet, Podman 4.4–4.9:** `quadlet/litellm-wait-postgres.service`, a plain (non-Quadlet) oneshot unit. It runs a throwaway `postgres:16-alpine` container **on the same Podman network** executing `pg_isready -h litellm-postgres -p 5432 -U litellm -d litellm` in a **bounded** loop (60 attempts × 3s = 180s, then a loud non-zero exit rather than hanging forever), with `TimeoutStartSec=300`, `RemainAfterExit=yes`, and `ExecStartPre=`/`ExecStopPost=` cleanup of a stale container name. Because it reuses an image the stack already pulls, it adds no busybox to pin and patch; and because it goes over the network by hostname, it additionally proves that aardvark-dns resolves the exact name in `DATABASE_URL`. `litellm.container` pulls it in with `Wants=` rather than `Requires=`, so it is harmless whether or not it is installed.
+2. **Quadlet, this repo:** `ExecStartPost=` on `litellm-postgres.container`, a bounded `until podman exec litellm-postgres pg_isready -h 127.0.0.1 ...` loop. systemd keeps the unit in `activating (start-post)` until it returns, so `litellm-postgres.service` reports `active` only when the database genuinely answers, and `litellm.container`'s `Requires=`+`After=` gets a real health gate — no side-car, no extra image, no TCP-only race. Strictly better than the k3s original. (`Notify=healthy` would express the same intent on Podman 5.0+, but 4.9.3 ignores it, so it is not used.)
+3. **What the earlier revision of this repo did, and why it is gone:** `quadlet/litellm-wait-postgres.service`, a plain oneshot unit that ran a throwaway `postgres` container on the same network polling `pg_isready -h litellm-postgres` 60 × 3s. It worked, but it was pulled in with a soft `Wants=` (so a failure did not stop the proxy), it needed a second container and a `/usr/bin/podman` path rewrite at install time, and it gated only the unit that referenced it. Moving the same probe into the database unit's `ExecStartPost=` removed all four problems.
 
-Two further deliberate details: on Podman 4.x, `Notify=` accepts only `true`/`false`, and an invalid value makes Quadlet **fail to generate the unit at all** — the symptom is `Unit litellm-postgres.service not found`, which looks nothing like a config error. And `Notify=` is deliberately **not** set on `litellm.container` itself, citing podman issue #27290; the proxy's readiness is handled by `HealthStartupCmd=` instead.
+One further deliberate detail: `Notify=` is not set on either unit. On 4.9.3 `Notify=healthy` is accepted and silently downgraded to `--sdnotify=conmon`, and on 5.x it would interact badly with a long `HealthStartPeriod` (podman issue #27290: if the start period exceeds `TimeoutStartSec`, systemd kills the unit before the check can pass). The proxy's readiness is handled by `HealthStartupCmd=` and observed with `podman inspect`, and the database's by `ExecStartPost=`.
 
-> **Important:** the wait unit is a plain `.service` file and must be installed into `~/.config/systemd/user/`, **not** into `~/.config/containers/systemd/`. Quadlet reads only its own file types from its search paths, so a `.service` dropped there is silently ignored and you get `Unit not found`. `install.sh` places it correctly. It also rewrites the hardcoded `/usr/bin/podman` in `ExecStart=` to whatever `command -v podman` reports, because a systemd user unit's `PATH` is minimal.
+> **Still worth knowing:** a plain `.service` file belongs in `~/.config/systemd/user/`, **not** in `~/.config/containers/systemd/`. Quadlet reads only its own file types from its search paths, so a `.service` dropped there is silently ignored and you get `Unit not found`. `scripts/install.sh` routes each file by type. In `ExecStartPost=` the repo calls a bare `podman`, which systemd resolves on its own fixed search path, rather than hardcoding `/usr/bin/podman`.
 
 ### 5.3 A named volume, not a rootless bind mount
 
@@ -417,7 +418,7 @@ The compose file has `expose: ["5432"]` and **no** `ports:`. The Quadlet unit ha
 
 For ad-hoc access: `podman exec -it litellm-postgres psql -U litellm -d litellm`.
 
-**A related asymmetry worth knowing about.** The two paths publish the *proxy* port differently. `docker-compose.yml` uses `"${LITELLM_PORT:-4000}:4000"`, which binds all interfaces (a loopback-only alternative is present but commented out), because a Portainer-deployed stack is usually meant to be reachable from the LAN. `quadlet/litellm.container` uses `PublishPort=127.0.0.1:4000:4000` — **loopback only** — because the Quadlet path is the production one and the safe default there is that nothing is reachable until you deliberately put a reverse proxy in front of it. This is intentional, not an oversight, but it does mean the two paths are not interchangeable without adjusting that one line.
+**The proxy port is loopback by default.** `PublishPort=` is rendered from `LITELLM_BIND`/`LITELLM_PORT` in `~/.config/litellm/litellm.env`, and the shipped default is `127.0.0.1:4000`: nothing is reachable until you deliberately put a reverse proxy, an overlay network or a firewalled LAN address in front of it. `scripts/install.sh --bind <address>` changes it and warns when the address is not loopback.
 
 ### 5.5 cloudflared is omitted entirely
 
@@ -441,9 +442,9 @@ Neither path sets `entrypoint:` or `Entrypoint=`, and neither prefixes the argum
 
 ### 5.8 Image references are fully qualified; digest pinning is offered but not shipped
 
-`postgres:16-alpine` becomes `docker.io/library/postgres:16-alpine`. Short names resolve through the `registries.conf` search order and can prompt interactively — which fails silently inside a non-interactive systemd unit.
+`postgres:16-alpine` becomes `docker.io/library/postgres:16.15-alpine3.24`. Short names resolve through the `registries.conf` search order and can prompt interactively — which fails silently inside a non-interactive systemd unit.
 
-`16-alpine` is also a **moving tag**: two hosts installing this repo weeks apart can end up on different Postgres binaries against the same on-disk data directory. `litellm-postgres.container` therefore carries a commented digest-pinned image line and the two commands needed to produce the digest. **No digest is shipped**, because none was pulled or verified while writing this repo — inventing one would have been worse than leaving the tag.
+`16-alpine` was also a **moving tag**: two hosts installing this repo weeks apart could end up on different Postgres binaries against the same on-disk data directory. Both images are therefore pinned to an exact version, and `tests/dryrun.sh` fails the build if a floating tag reappears. Digest pinning remains available (`Image=...@sha256:...`) if you want it; no digest is shipped, because inventing one would be worse than an exact tag.
 
 Relatedly, `AutoUpdate=registry` is deliberately not set: it would silently replace the database engine underneath a live data directory. Updates should be deliberate.
 
@@ -455,7 +456,7 @@ Relatedly, `AutoUpdate=registry` is deliberately not set: it would silently repl
 
 **Zero-downtime updates.** `maxUnavailable: 0` and `maxSurge: 1` do not survive the move. Every image upgrade, config change or `systemctl restart` produces a short window in which requests fail. With `HealthStartPeriod=120s` and a `HealthStartupRetries=40 × 15s` budget, LiteLLM's own startup can take a while; the restart is reliable, not invisible. Clients need retry logic, or you need a maintenance window.
 
-**Declarative reconciliation.** Nothing watches the deployment. A container removed by hand stays removed. A unit file edited without `daemon-reload` has no effect. Drift is detected — by `scripts/smoke-test.sh`, by `systemctl --user status`, by monitoring for `failed` units — but never corrected. The operating model shifts from "declare and let the controller converge" to "apply, then verify".
+**Declarative reconciliation.** Nothing watches the deployment. A container removed by hand stays removed. A unit file edited without `daemon-reload` has no effect. Drift is detected — by `tests/smoke.sh`, by `systemctl --user status`, by monitoring for `failed` units — but never corrected. The operating model shifts from "declare and let the controller converge" to "apply, then verify".
 
 **A real secret store.** Unix file permissions on a `0600` env file, and nothing more. No RBAC, no per-key mounting, no encryption at rest, no audit trail of who read what.
 
@@ -471,7 +472,7 @@ Relatedly, `AutoUpdate=registry` is deliberately not set: it would silently repl
 
 **The machine's own init system supervises the workload.** systemd already restarts failed services, orders startup, handles boot, collects logs and exposes status. Quadlet uses that instead of reimplementing it. `systemctl --user status litellm`, `journalctl --user -u litellm -f`, and `systemctl --user list-units 'litellm*'` are the whole operational interface, and every Linux administrator already knows them.
 
-**Boots with the machine, for real.** `[Install] WantedBy=default.target multi-user.target` plus `loginctl enable-linger $USER` means the stack comes up after a power cut with no cron hack, no `@reboot`, no wrapper script.
+**Boots with the machine, for real.** `[Install] WantedBy=default.target` plus `loginctl enable-linger $USER` means the stack comes up after a power cut with no cron hack, no `@reboot`, no wrapper script.
 
 **Rootless by default.** No root daemon anywhere in the picture. A container escape lands in an unprivileged user account. This is a genuine improvement over both a Docker daemon and a root-running kubelet, and it costs almost nothing for this workload — the only real friction is the UID-mapping issue that §5.3 designs around and the cgroup delegation caveat in §4.5.
 
@@ -521,19 +522,18 @@ Nothing in this repository was executed against a live Podman host. Before trust
 | Check | Command |
 |---|---|
 | cgroup v2 present (Quadlet requires it) | `podman info --format '{{.Host.CgroupsVersion}}'` |
-| Podman version vs `Notify=healthy` (needs 5.0+) | `podman --version` |
+| Podman version (4.9 minimum; the units are validated against the 4.9.3 generator) | `podman --version` |
 | **Which unit names Quadlet will actually generate** | `QUADLET_UNIT_DIRS=<repo>/quadlet /usr/lib/systemd/system-generators/podman-system-generator --user --dryrun` |
 | Units are running | `systemctl --user list-units 'litellm*'` |
 | Container health | `podman ps --format '{{.Names}}\t{{.Status}}'` |
 | Rootless CPU limits are actually applied | `podman stats` |
-| End-to-end function | `scripts/smoke-test.sh` |
+| End-to-end function | `tests/smoke.sh` |
 
 The dry-run in the third row is the most important. Quadlet's silent-skip behaviour on an unrecognised key means a typo produces `Unit not found` rather than a parse error, and the dry-run is the only way to see the generated unit names before you start anything.
 
 Specific items that are documented from behaviour rather than from testing, and should be treated as such:
 
-- `Notify=healthy` semantics on Podman 5.x, and the exact failure mode on 4.x.
-- The `postgres` alias is set with `PodmanArgs=--network-alias=postgres` rather than the native `NetworkAlias=` key, because `NetworkAlias=` only exists from Podman 5.2 and Quadlet skips an entire unit that contains a key it does not recognise. `PodmanArgs=` itself requires Podman 4.6+.
-- Whether `depends_on: condition: service_healthy` is honoured by your podman-compose (needs ≥ 1.3 with Podman ≥ 4.6).
-- The commented hardening options (`NoNewPrivileges=`, `DropCapability=`/`AddCapability=`, `ReadOnly=`) are commented out precisely because they were never tested. Apply them one at a time and check `podman logs` after each.
+- `Notify=healthy` semantics on Podman 5.x (on 4.9.3 the "accepted and ignored" behaviour was verified with the generator, which is why the key is not used).
+- `PodmanArgs=` requires Podman 4.6+; the whole unit is skipped on anything older, which is one reason `scripts/install.sh` refuses to run below 4.9.
+- `NoNewPrivileges=true` is now set on both containers, but was not exercised at runtime before the first live install. `DropCapability=`/`AddCapability=` and `ReadOnly=` remain unset: Postgres genuinely needs CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID at first init, and a read-only proxy needs `LITELLM_MIGRATION_DIR`, `LITELLM_UI_PATH` and `LITELLM_ASSETS_PATH` redirected first. Apply them one at a time and check `podman logs` after each.
 - The `DISABLE_SCHEMA_UPDATE=false` decision in §5.1, which is a reasoned trade rather than a verified outcome.
