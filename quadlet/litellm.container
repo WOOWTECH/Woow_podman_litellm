@@ -1,262 +1,82 @@
-# =============================================================================
-# litellm.container - the LiteLLM OpenAI-compatible proxy (the gateway itself)
-# WOOWTECH / Woow_podman_litellm
-# -----------------------------------------------------------------------------
-# Generated systemd unit : litellm.service     (.container -> <name>.service, no suffix)
-# Resulting container    : litellm             (because ContainerName= is set)
+# litellm: the LiteLLM OpenAI-compatible proxy (the WOOWTECH gateway itself).
 #
-# k3s equivalent: k8s/04-litellm-deployment.yaml (Deployment + ClusterIP Service).
+# Rendered by scripts/install.sh from ~/.config/litellm/litellm.env (the double-at tokens
+# are listed in quadlet/render-vars). Edit the env file and re-run install.sh; do not edit
+# the installed copy. Published on @@LITELLM_BIND@@:@@LITELLM_PORT@@.
 #
-# MINIMUM PODMAN VERSION
-#   Podman 5.0+ for the stack as shipped (litellm-postgres.container uses
-#   Notify=healthy). This file itself parses on 4.4+; see the ORDERING block.
-# =============================================================================
-
+# Secrets are podman secrets created by install.sh; none is in this file, in the env file
+# after you blank it, or in config.yaml (which dereferences os.environ/NAME).
 [Unit]
 Description=LiteLLM proxy (WOOWTECH gateway, OpenRouter-backed)
 Documentation=https://github.com/WOOWTECH/Woow_podman_litellm
 Documentation=https://docs.litellm.ai/docs/proxy/prod
-
-# -----------------------------------------------------------------------------
-# ORDERING: do not start the proxy until Postgres is actually HEALTHY.
-# -----------------------------------------------------------------------------
-# PRIMARY PATH (Podman 5.0+):
-#   litellm-postgres.container sets Notify=healthy, so its generated Type=notify
-#   service is not reported "active" until pg_isready succeeds. Requires= makes
-#   that dependency hard (if Postgres fails to start, this unit is not started
-#   and is stopped too); After= supplies the ordering. Both are needed -
-#   Requires= on its own orders nothing, that is plain systemd.unit(5) semantics.
+# A real readiness gate: litellm-postgres only turns active after its ExecStartPost=
+# saw Postgres accept TCP connections. Requires= alone orders nothing; After= does.
 Requires=litellm-postgres.service
 After=litellm-postgres.service
-
-# FALLBACK PATH (Podman 4.4-4.9, where Notify=healthy does not exist):
-#   litellm-wait-postgres.service is a plain systemd oneshot that polls until
-#   Postgres answers, mirroring the k3s "wait-for-postgres" initContainer.
-#   It is pulled in with Wants= (NOT Requires=) on purpose: Wants= to a unit
-#   that was never installed is a no-op, so this pair is harmless on hosts that
-#   rely on the primary path, and it is belt-and-braces where it IS installed
-#   (on a healthy Podman 5.x host the poll succeeds on its first iteration).
-Wants=litellm-wait-postgres.service
-After=litellm-wait-postgres.service
-
-# Park the unit in "failed" instead of hot-looping on a broken config - Podman
-# has no CrashLoopBackOff, so this is how a bad DATABASE_URL becomes visible
-# rather than flooding the journal forever.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
-# NOTE: Requires=/After=litellm-network.service is injected automatically by
-# Quadlet because of the Network= line below. Do not hand-write it.
-
 [Container]
 ContainerName=litellm
-
-# Pinned, fully-qualified. v1.83.14-stable is a real published GitHub release
-# (2026-05-02) and is the same tag the k3s deployment runs, which is the whole
-# point: identical gateway behaviour, different orchestrator.
+# Same pinned tag as the k3s deployment (Woow_k3s_litellm): identical gateway behaviour.
 Image=ghcr.io/berriai/litellm:v1.83.14-stable
-#
-# OPTIONAL - digest pinning (recommended for reproducibility). Obtain it with:
-#   podman pull ghcr.io/berriai/litellm:v1.83.14-stable
-#   podman image inspect --format '{{index .RepoDigests 0}}' ghcr.io/berriai/litellm:v1.83.14-stable
-# No digest is shipped here because none was pulled or verified while writing
-# this repo - do not trust a hand-written sha256.
-#Image=ghcr.io/berriai/litellm:v1.83.14-stable@sha256:PASTE_DIGEST_HERE
-
-# --- networking ------------------------------------------------------------
 Network=litellm.network
-
-# PUBLISHED ON LOOPBACK ONLY, BY DESIGN.
-#   On k3s the proxy sits behind a ClusterIP Service and is unreachable from
-#   outside the cluster; external access came solely from a Cloudflare tunnel
-#   that this package deliberately does not ship. A bare "4000:4000" would bind
-#   every host interface and hand the Admin UI and the /v1 API to the LAN.
-#   To expose it on purpose, change this to 0.0.0.0:4000:4000 - or, better,
-#   terminate TLS + auth in a reverse proxy in front of 127.0.0.1:4000.
-#   Rootless publishing of port 4000 needs no privilege (only ports < 1024 do).
-#
-#   NEVER paste the k3s Cloudflare tunnel token into this stack. A second
-#   connector registered with the same token splits inbound production traffic
-#   between two different backends. If you want a tunnel, create a NEW tunnel
-#   with a NEW hostname and a NEW token. See README "Security Notes".
-PublishPort=127.0.0.1:4000:4000
-
-# --- configuration ---------------------------------------------------------
-# ONE copy of config.yaml, mounted read-only. install.sh copies the repo's
-# config/config.yaml to ~/.config/litellm/config.yaml; both Podman deployment
-# paths read the same source file, which removes the k3s repo's standing hazard
-# of a byte-for-byte duplicate embedded in a ConfigMap that must be hand-synced.
-#
-# ":Z" applies a PRIVATE SELinux label to the host file. That is correct here
-# because ~/.config/litellm/config.yaml is a copy owned by this stack alone.
-# If you ever point this at a file that the podman-compose path ALSO mounts,
-# switch to ":z" (shared) - ":Z" relabels the file into one container's private
-# category and would break the other consumer.
-# On non-SELinux hosts (Debian/Ubuntu) the flag is simply ignored.
+PublishPort=@@LITELLM_BIND@@:@@LITELLM_PORT@@:4000
+# One copy of config.yaml, installed by install.sh from config/config.yaml. ":Z" is a
+# private SELinux label (ignored on Ubuntu).
 Volume=%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z
-
-# Exec= is appended AFTER the image, exactly like a Kubernetes `args:` field -
-# it supplies CMD and leaves the image ENTRYPOINT intact. The image's entrypoint
-# is docker/prod_entrypoint.sh, which ends in `exec litellm "$@"`, so this
-# becomes `litellm --config /app/config.yaml --port 4000`.
-# Do NOT prefix this with the word "litellm" (it would become a stray positional
-# argument) and do NOT set Entrypoint=.
+# Arguments only: the image entrypoint ends in `exec litellm "$@"`. Never set Entrypoint=.
 Exec=--config /app/config.yaml --port 4000
 
-# --- environment -----------------------------------------------------------
-# OPENROUTER_API_KEY, LITELLM_MASTER_KEY, LITELLM_SALT_KEY and DATABASE_URL come
-# from the installed env file (chmod 600). config.yaml never contains a secret -
-# it dereferences them as os.environ/NAME, which is why the identical config
-# file works on k3s, on compose and here.
-EnvironmentFile=%h/.config/litellm/litellm.env
-
-# PRECEDENCE: Quadlet emits Environment= as `podman run --env` and
-# EnvironmentFile= as `--env-file`. Podman merges --env-file first, then joins
-# --env over it (pkg/specgenutil/specgen.go: "File env is overridden by env"),
-# so --env wins regardless of order on the command line. The four Environment=
-# lines below are therefore AUTHORITATIVE: setting the same key in litellm.env
-# has no effect. Change them here, then:
-#   systemctl --user daemon-reload && systemctl --user restart litellm.service
-
-# Persist models added from the Admin UI into Postgres (mirrors k3s).
+Secret=litellm-database-url,type=env,target=DATABASE_URL
+Secret=litellm-master-key,type=env,target=LITELLM_MASTER_KEY
+# Encrypts every provider credential stored in Postgres. Set once, never rotated; backed
+# up by scripts/backup.sh (secrets.env). Losing it makes those credentials unreadable.
+Secret=litellm-salt-key,type=env,target=LITELLM_SALT_KEY
+Secret=litellm-openrouter-api-key,type=env,target=OPENROUTER_API_KEY
 Environment=STORE_MODEL_IN_DB=True
-
-# Disables load_dotenv(), i.e. stops LiteLLM auto-loading a stray local .env.
+# Disables load_dotenv(): LiteLLM never auto-loads a stray local .env.
 Environment=LITELLM_MODE=PRODUCTION
-
-# k3s parity. LiteLLM's own production guidance is "ERROR"; "INFO" is valid,
-# just noisier. To troubleshoot, change the value on the NEXT LINE - not in
-# litellm.env, where it is masked (see PRECEDENCE above).
-Environment=LITELLM_LOG=INFO
-
-# -----------------------------------------------------------------------------
-# DISABLE_SCHEMA_UPDATE - THE ONE SETTING DELIBERATELY NOT COPIED FROM k3s
-# -----------------------------------------------------------------------------
-# The k3s Deployment sets this to "true" because that cluster's schema already
-# exists and multiple proxy replicas must not race each other on migrations.
-#
-# This stack starts against a BRAND-NEW EMPTY volume and runs exactly ONE proxy
-# process, so there is nothing to race. With "true", LiteLLM replaces its
-# startup `prisma migrate deploy` with a read-only `prisma migrate diff` that
-# only PRINTS the SQL it would need - it creates no tables at all. The proxy
-# then logs a "prisma schema out of sync with db" warning and every DB-backed
-# operation fails with "relation does not exist"; /health/readiness never
-# reports the database connected.
-#
-# Leave this as false (or delete the line - false is LiteLLM's own default).
-# Only set it to "true" if you have added a separate one-shot migration step,
-# e.g. a Type=oneshot unit running the same image with `--skip_server_startup`.
+Environment=LITELLM_LOG=@@LITELLM_LOG@@
+# Deliberately NOT the k3s value (true): this stack starts on an empty volume and runs
+# exactly one proxy, which must run the Prisma migrations itself. With true it would only
+# print the SQL, create no tables, and /health/readiness would never pass.
 Environment=DISABLE_SCHEMA_UPDATE=false
 
-# --- health checks ---------------------------------------------------------
-# Podman is genuinely richer than compose here: it has a SEPARATE startup
-# healthcheck, which lets this file reproduce the k8s startupProbe/livenessProbe
-# split that a single compose `healthcheck:` block cannot express.
-#
-# THE LITELLM IMAGE SHIPS PYTHON BUT NOT curl. A healthcheck written as
-# `curl -f http://localhost:4000/...` fails permanently with "executable not
-# found". Use the urllib one-liner below, exactly as the k3s repo's own tests
-# and compose file do. If your image variant exposes only `python3`, change the
-# interpreter name in both commands.
-
-# PHASE 1 - startup probe, DB-aware. /health/readiness returns 200 only once the
-# database is connected, so this covers image extraction, the first Prisma
-# migration and model-list validation. Failures here do NOT count toward the
-# regular HealthRetries budget. 40 x 15s = 10 minutes of grace.
+# The image ships python but not curl. Startup probe (k8s startupProbe): readiness is
+# DB-aware and covers the first Prisma migration; 40 x 15 s = 10 minutes of grace.
 HealthStartupCmd=python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/readiness').status==200 else 1)"
 HealthStartupInterval=15s
 HealthStartupTimeout=10s
 HealthStartupRetries=40
 HealthStartupSuccess=1
-
-# PHASE 2 - steady-state liveness. /health/liveliness (that spelling is the
-# canonical route; /health/liveness is an alias) is a pure process-alive check
-# that does NOT touch the database, matching the k3s livenessProbe timings
-# (period 20s, timeout 10s, failureThreshold 6).
-#
-# Do NOT point a healthcheck at plain /health - that endpoint requires a valid
-# key AND fires a real test request at every configured model, so it would burn
-# OpenRouter credits on every probe interval.
+# Liveness (k3s timings 20 s / 10 s / 6). Never probe plain /health: it calls every
+# configured model upstream and costs money on every interval.
 HealthCmd=python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness').status==200 else 1)"
 HealthInterval=20s
 HealthTimeout=10s
 HealthRetries=6
-# Mirrors the k3s initialDelaySeconds: 120. Largely redundant while
-# HealthStartupCmd is in use (the regular check does not run until the startup
-# check succeeds) but kept so the timings still match k3s if you delete the
-# startup phase.
 HealthStartPeriod=120s
-
-# Reproduce the kubelet restarting a container whose livenessProbe fails:
-# Podman does nothing about an unhealthy container by default. "kill" lets
-# [Service] Restart=always below bring it back.
+# podman does nothing about an unhealthy container by default; kill lets Restart=always
+# bring it back, like a failed livenessProbe.
 HealthOnFailure=kill
 
-# NOTIFY IS DELIBERATELY LEFT UNSET HERE.
-#   Nothing depends on litellm.service, so gating systemd's "started" signal on
-#   a 120s-plus readiness check would buy nothing and would expose this unit to
-#   the known Notify=healthy / TimeoutStartSec interaction (podman issue #27290,
-#   open as of Podman 5.6.2): if HealthStartPeriod exceeds TimeoutStartSec,
-#   systemd kills the unit before the check can ever pass. The unit therefore
-#   reports "active" once conmon starts, and readiness is observed through
-#   `podman inspect --format '{{.State.Health.Status}}' litellm`.
-#   If you DO add Notify=healthy, keep TimeoutStartSec well above 120s.
-
-# --- resource limits (k3s limits: cpu "2", memory 2Gi) ---------------------
-# k8s `requests` are scheduler hints with no single-host meaning; dropped.
-# PodmanArgs= is used rather than the native Memory= key because Memory= only
-# exists from Podman 5.5.0. On 5.5+ you may write `Memory=2g` instead.
-#
-# SIZING NOTE: LiteLLM's own production docs describe ~4Gi per worker as a floor
-# rather than a target, because Prisma runs its query engine as a separate
-# process whose resident memory behaves as a high-water mark. 2Gi is kept here
-# for exact parity with the k3s deployment. If the proxy is OOM-killed under
-# load, raise this first.
-PodmanArgs=--memory=2g
-PodmanArgs=--cpus=2.0
-#
-# ROOTLESS CAVEAT: cpu/cpuset controllers are not delegated to user slices by
-# default, so --cpus may be silently ineffective. Verify with `podman stats`;
-# see litellm-postgres.container for the delegate.conf fix.
-
-# --- metadata --------------------------------------------------------------
+# k3s limits (cpu 2, memory 2Gi). LiteLLM's docs call ~4Gi per worker a floor: raise this
+# first if the proxy is OOM-killed.
+PodmanArgs=--memory=2g --cpus=2.0
 Label=app=litellm
 Label=io.woowtech.stack=litellm-gw
-Label=app.kubernetes.io/part-of=woow-litellm
-
-# --- optional hardening (NOT enabled: never live-tested) -------------------
-# Apply one at a time and check `podman logs litellm` after each.
-# ReadOnly=true additionally requires LITELLM_MIGRATION_DIR, LITELLM_UI_PATH and
-# LITELLM_ASSETS_PATH to point at writable locations, or migrations and the
-# Admin UI break.
-#NoNewPrivileges=true
-#DropCapability=ALL
-#ReadOnly=true
-#Tmpfs=/tmp:rw,size=256m
-
-# --- deliberately NOT set --------------------------------------------------
-# AutoUpdate=registry - semantically incoherent with a pinned tag/digest, and an
-#   unattended gateway upgrade is exactly what you do not want. Update manually.
-# Pull=  - podman's default is already --pull=missing == imagePullPolicy: IfNotPresent.
+Label=io.woowtech.app=litellm
+NoNewPrivileges=true
 
 [Service]
-# Quadlet does not set Restart= for .container units, so the systemd default is
-# Restart=no. Without this line a crashed proxy stays down.
 Restart=always
 RestartSec=10
-
-# systemd's 90s default start timeout is shorter than a first-run pull of the
-# multi-gigabyte LiteLLM image, so the very first `systemctl --user start` on a
-# clean host would fail with "start operation timed out" even though nothing is
-# wrong. install.sh also pre-pulls the images to keep the pull outside this
-# window entirely.
+# The first boot runs the Prisma migrations; install.sh pre-pulls the image so the
+# pull never counts against this.
 TimeoutStartSec=600
-
-# Let in-flight requests drain rather than being SIGKILLed.
 TimeoutStopSec=60
 
 [Install]
-# See litellm-postgres.container for why [Install] is the ONLY way to enable a
-# Quadlet unit and why `loginctl enable-linger $USER` is mandatory for rootless
-# boot-time start.
-WantedBy=default.target multi-user.target
+WantedBy=default.target

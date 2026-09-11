@@ -1,230 +1,59 @@
-# =============================================================================
-# litellm-postgres.container - PostgreSQL 16 backing store for the LiteLLM proxy
-# WOOWTECH / Woow_podman_litellm
-# -----------------------------------------------------------------------------
-# Generated systemd unit : litellm-postgres.service   (.container -> <name>.service, no suffix)
-# Resulting container    : litellm-postgres           (because ContainerName= is set)
+# litellm-postgres: PostgreSQL 16 for the WOOWTECH LiteLLM gateway. Not published.
 #
-# k3s equivalent: k8s/02-postgres.yaml (headless Service + 1-replica StatefulSet).
+# Readiness gate: podman 4.9.3 silently ignores Notify=healthy (the generated unit gets
+# --sdnotify=conmon, so "started" means "container started"). ExecStartPost= below keeps
+# this unit "activating" until Postgres accepts TCP connections, so the Requires=/After=
+# in litellm.container really waits for a usable database. It replaces the old
+# litellm-wait-postgres.service (same probe, no extra container, no soft Wants=).
 #
-# MINIMUM PODMAN VERSION
-#   Podman 5.0+ as written, because of `Notify=healthy` (see the block below).
-#   On Podman 4.6-4.9: comment out the Notify= line and install the
-#   litellm-wait-postgres.service fallback shipped alongside this file.
-#   4.6 is the hard floor for THIS file regardless of Notify=, because
-#   PodmanArgs= (used below for --network-alias, --memory and --cpus) was only
-#   added in Podman 4.6.0. Quadlet exists from 4.4, but a Quadlet unit that
-#   contains a key the local Podman does not know is SKIPPED ENTIRELY - no
-#   .service file is generated - so 4.4/4.5 need those PodmanArgs= lines
-#   removed, not merely ignored.
-#   Quadlet itself requires cgroup v2 - check with
-#     podman info --format '{{.Host.CgroupsVersion}}'
-# =============================================================================
-
+# Least privilege: this container gets only its own password, as a secret file. The
+# provider, master and salt keys never reach it.
 [Unit]
 Description=PostgreSQL 16 for the WOOWTECH LiteLLM gateway
 Documentation=https://github.com/WOOWTECH/Woow_podman_litellm
-
-# Give up instead of hot-looping forever on a genuinely broken config (e.g. a
-# bad POSTGRES_PASSWORD). After 5 failed starts inside 300s the unit lands in
-# "failed", which is a visible, alertable state - this is the closest Podman
-# analogue of Kubernetes' CrashLoopBackOff, which Podman otherwise lacks.
+# Park the unit in "failed" instead of hot-looping on a broken setup (podman has no
+# CrashLoopBackOff).
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
-# NOTE: Requires=/After= on litellm-network.service and
-# litellm-pgdata-volume.service are injected AUTOMATICALLY by Quadlet because
-# this unit references litellm.network and litellm-pgdata.volume below.
-# Do not hand-write them.
-
 [Container]
 ContainerName=litellm-postgres
-
-# Fully-qualified image reference. Short names ("postgres:16-alpine") depend on
-# the registries.conf search order and can prompt interactively, which fails
-# inside a non-interactive systemd unit.
-Image=docker.io/library/postgres:16-alpine
-#
-# OPTIONAL - digest pinning. "16-alpine" is a MOVING tag: two hosts installing
-# this repo weeks apart can end up on different Postgres binaries against the
-# same on-disk data directory. To pin, run
-#   podman pull docker.io/library/postgres:16-alpine
-#   podman image inspect --format '{{index .RepoDigests 0}}' docker.io/library/postgres:16-alpine
-# and paste the result below instead of the tag. No digest is shipped here
-# because none was pulled or verified while writing this repo.
-#Image=docker.io/library/postgres:16-alpine@sha256:PASTE_DIGEST_HERE
-
-# --- networking ------------------------------------------------------------
-# Referencing the .network unit by FILENAME makes Quadlet inject
-# Requires=+After=litellm-network.service automatically.
+# Pinned minor version (STANDARD section 3); upgrade = bump here, then scripts/upgrade.sh.
+Image=docker.io/library/postgres:16.15-alpine3.24
 Network=litellm.network
-
-# DNS: on a user-defined network aardvark-dns resolves the CONTAINER NAME, so
-# ContainerName=litellm-postgres above is what makes
-#   DATABASE_URL=postgresql://litellm:...@litellm-postgres:5432/litellm
-# resolve - the same hostname the k3s headless Service provides. The extra
-# alias below also accepts the bare host "postgres", which is what the older
-# plain-docker compose file in the k3s repo used, so a DATABASE_URL copied from
-# either source keeps working.
-# The extra alias goes through PodmanArgs= rather than the native NetworkAlias=
-# key on purpose: NetworkAlias= only exists in Podman 5.2+, and Quadlet rejects
-# an unknown key by SKIPPING THE ENTIRE UNIT - no .service is generated at all,
-# so `systemctl --user start litellm-postgres.service` would report
-# "Unit litellm-postgres.service not found", and litellm.service (which has
-# Requires=litellm-postgres.service) would never start either. PodmanArgs= has
-# been available since Podman 4.6, which this file already relies on below for
-# --memory/--cpus. On Podman 5.2+ you may swap the next line for
-# `NetworkAlias=postgres`; ContainerName-based resolution works either way.
-PodmanArgs=--network-alias=postgres
-
-# DELIBERATELY NO PublishPort= HERE.
-#   On k3s this database is behind a headless ClusterIP Service and is not
-#   reachable from outside the cluster at all. A naive compose translation often
-#   adds `ports: ["5432:5432"]`, which would expose the LiteLLM database - every
-#   virtual key, budget row and ENCRYPTED provider credential - to the whole
-#   host and, on a bare mapping, to the LAN. The proxy reaches Postgres over the
-#   internal bridge network; nothing on the host needs the port.
-#   For an ad-hoc psql session use `podman exec -it litellm-postgres psql -U litellm -d litellm`
-#   rather than publishing the port.
-
-# --- storage ---------------------------------------------------------------
-# Referencing the .volume unit by FILENAME injects
-# Requires=+After=litellm-pgdata-volume.service automatically.
 Volume=litellm-pgdata.volume:/var/lib/postgresql/data
-
-# --- environment -----------------------------------------------------------
-# PGDATA points one level BELOW the mount root. The postgres entrypoint refuses
-# to initdb into a non-empty directory, and a mount root can carry lost+found or
-# ownership artefacts. This mirrors the k3s StatefulSet byte-for-byte and keeps
-# the on-disk layout portable between the two deployments.
 Environment=PGDATA=/var/lib/postgresql/data/pgdata
+Environment=POSTGRES_USER=litellm
+Environment=POSTGRES_DB=litellm
+# Read by initdb on an EMPTY volume only. On an existing volume the role keeps its
+# password; change it with scripts/rotate-secrets.sh --db (ALTER ROLE + both secrets).
+Environment=POSTGRES_PASSWORD_FILE=/run/secrets/postgres-password
+Secret=litellm-postgres-password,type=mount,target=/run/secrets/postgres-password,mode=0400
 
-# POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB come from the installed env
-# file. install.sh copies your .env here and chmod 600s it. %h expands to the
-# service user's home directory.
-#
-# NOTE: this single file also carries the LiteLLM keys, so Postgres sees them
-# too. If you want least-privilege injection, split it into two files
-# (postgres.env / litellm.env) and point each unit at its own - EnvironmentFile=
-# is repeatable and order-preserving.
-EnvironmentFile=%h/.config/litellm/litellm.env
-
-# --- health check ----------------------------------------------------------
-# Timings copied from the k3s readinessProbe (initialDelay 10s, period 10s,
-# timeout 5s). Kubernetes has three probe types; a Podman container has exactly
-# one regular healthcheck, so readiness and liveness collapse into this one.
-# We keep the READINESS timings because this is the signal the proxy's ordering
-# dependency gates on.
-#
-# The user and database name are HARDCODED on purpose. HealthCmd= is written
-# verbatim into the generated ExecStart= line, where a literal "$" is subject to
-# systemd variable expansion - `pg_isready -U $POSTGRES_USER` would silently
-# become `pg_isready -U`. The k3s repo's own compose file hardcodes them for the
-# same reason. If you change POSTGRES_USER/POSTGRES_DB in the env file, change
-# this line to match.
-HealthCmd=pg_isready -U litellm -d litellm
+# TCP probe (-h 127.0.0.1): during first-boot init the entrypoint runs a temporary server
+# on the unix socket only, so a socket probe would report "ready" too early.
+HealthCmd=pg_isready -h 127.0.0.1 -p 5432 -U litellm -d litellm
 HealthInterval=10s
 HealthTimeout=5s
 HealthRetries=3
-HealthStartPeriod=10s
-
-# Reproduce the kubelet's restart-on-liveness-failure behaviour: Podman does
-# nothing about an unhealthy container by default. "kill" is the value the
-# Podman docs describe as integrating best with systemd - the container is
-# killed and [Service] Restart=always below brings it back.
+# 60 s, so HealthOnFailure=kill cannot kill a slow first initdb on a small host.
+HealthStartPeriod=60s
 HealthOnFailure=kill
 
-# --- startup gating (THE replacement for the k3s wait-for-postgres init container)
-# Notify=healthy makes Podman withhold the systemd READY notification until the
-# healthcheck above passes. The generated service is Type=notify, so systemd
-# reports this unit as "active" only once Postgres genuinely answers pg_isready
-# - not merely once the process spawned. litellm.container then orders itself
-# After=litellm-postgres.service and gets a real health gate for free, with no
-# busybox side-car and no TCP-only `nc -z` race.
-#
-# REQUIRES PODMAN 5.0+. On Podman 4.x, Notify= only accepts true/false; an
-# invalid value makes Quadlet fail to generate this unit at all, and
-# `systemctl --user start litellm-postgres.service` then reports
-# "Unit litellm-postgres.service not found". If that happens:
-#   1. comment out the next line, and
-#   2. install quadlet/litellm-wait-postgres.service (install.sh does this).
-Notify=healthy
-
-# --- resource limits (k3s limits: cpu "1", memory 1Gi) ---------------------
-# k8s `requests` are scheduler hints and have no meaning on a single host, so
-# they are dropped. Only the limits translate.
-#
-# These go through PodmanArgs= rather than the native [Container] Memory= key
-# because Memory= only exists from Podman 5.5.0; --memory works on every
-# Quadlet-capable version and shows up in `podman inspect` / `podman stats`,
-# which keeps this path equivalent to what docker-compose.yml expresses.
-# On Podman 5.5+ you may replace the first line with `Memory=1g`.
-# There is no [Container] CPU key at all - CPU must go through PodmanArgs=.
-PodmanArgs=--memory=1g
-PodmanArgs=--cpus=1.0
-#
-# ROOTLESS CAVEAT: the cpu and cpuset cgroup controllers are NOT delegated to
-# user slices by default, so --cpus can be silently ineffective. Verify with
-# `podman stats`. To fix, create /etc/systemd/system/user@.service.d/delegate.conf
-# containing:
-#     [Service]
-#     Delegate=memory pids cpu cpuset
-# then log out and back in. memory and pids are delegated by default.
-
-# --- metadata --------------------------------------------------------------
+# k3s limits (cpu 1, memory 1Gi). PodmanArgs= because Memory= needs podman 5.5. Rootless
+# hosts do not delegate the cpu controller by default, so --cpus may be a no-op there.
+PodmanArgs=--memory=1g --cpus=1.0
 Label=app=litellm-postgres
 Label=io.woowtech.stack=litellm-gw
-Label=app.kubernetes.io/part-of=woow-litellm
-
-# --- optional hardening (NOT enabled: never live-tested) -------------------
-# The k3s manifests set no securityContext at all, so this stack can improve on
-# them - but apply these ONE AT A TIME and check `podman logs litellm-postgres`
-# after each. The postgres entrypoint drops privileges to uid 70 with su-exec
-# and does chown/chmod work on PGDATA at first init, so it genuinely needs
-# CHOWN, DAC_OVERRIDE, FOWNER, SETGID and SETUID.
-#NoNewPrivileges=true
-#DropCapability=ALL
-#AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID
-
-# --- deliberately NOT set --------------------------------------------------
-# AutoUpdate=registry - incompatible with the intent of a pinned tag/digest and
-#   it would silently replace your database engine. Update deliberately instead.
-# Pull=            - `podman run` already defaults to --pull=missing, which is
-#   exactly the k3s imagePullPolicy: IfNotPresent. Omitting the key also keeps
-#   this file parseable on older Podman where Pull= did not exist.
-# Restart= as a PODMAN flag - systemd owns the process lifecycle here; the two
-#   restart mechanisms conflict. Use [Service] Restart= below.
+Label=io.woowtech.app=litellm
+NoNewPrivileges=true
 
 [Service]
-# Quadlet does NOT set Restart= for .container units, so without this line the
-# unit inherits systemd's default of Restart=no and a crashed database would
-# simply stay down. This is the Quadlet equivalent of compose's
-# `restart: unless-stopped` (Restart=always also restarts after `podman kill`,
-# but never after an explicit `systemctl --user stop`).
 Restart=always
 RestartSec=10
-
-# systemd's default TimeoutStartSec is 90s, which is shorter than a first-run
-# image pull on a slow link. With Notify=healthy the unit stays "activating"
-# until pg_isready passes, so the timeout must comfortably exceed
-# HealthStartPeriod + pull time. 300s is generous for a ~90 MB alpine image.
 TimeoutStartSec=300
-
-# Give Postgres time to finish a checkpoint on shutdown instead of being
-# SIGKILLed, which would force crash recovery on the next boot.
 TimeoutStopSec=90
+ExecStartPost=/usr/bin/timeout 240 /bin/sh -c 'until podman exec litellm-postgres pg_isready -h 127.0.0.1 -p 5432 -U litellm -d litellm >/dev/null 2>&1; do sleep 2; done'
 
 [Install]
-# You CANNOT `systemctl --user enable` a Quadlet unit - the generated services
-# are transient. Enablement is expressed ONLY by this section, which the
-# generator applies at daemon-reload time exactly as `systemctl enable` would.
-#
-# default.target      -> correct for ROOTLESS units in ~/.config/containers/systemd/
-# multi-user.target   -> correct for ROOTFUL units in /etc/containers/systemd/
-# Both are listed so this one file works in either location.
-#
-# ROOTLESS BOOT REQUIRES LINGERING. Without `loginctl enable-linger $USER` the
-# per-user systemd manager is torn down at logout and never started at boot, so
-# this [Install] section never fires and the stack dies when you log out.
-# install.sh runs that command for you.
-WantedBy=default.target multi-user.target
+WantedBy=default.target
