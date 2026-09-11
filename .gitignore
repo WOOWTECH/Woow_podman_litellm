@@ -5,13 +5,13 @@
 # state must never reach the repository.
 
 # --- secrets -----------------------------------------------------------------
-# The real environment files. Only the *.example templates are tracked.
+# The real environment files. Only the *.example templates and the dry-run fixtures
+# (dummy values, no credential) are tracked.
 .env
 .env.*
-!.env.example
-!.env.quadlet.example
 *.env
 !*.env.example
+!tests/fixtures/*.env
 secrets/
 *.key
 *.pem
