@@ -1,0 +1,93 @@
+# Repo-specific static checks. The Quadlet dry-run, the vendored-lib checksum and shellcheck
+# live in quadlet-ci.yml (vendored from Woow_quadlet_migration_plan; do not edit that one here).
+# This workflow keeps the checks of the old lint.yml that still apply, minus everything that
+# only concerned the deleted compose path.
+name: repo-checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (parse every shell script)
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            if bash -n "$f"; then echo "ok   $f"; else echo "FAIL $f"; fail=1; fi
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' | sort)
+          exit "$fail"
+
+      - name: scripts are executable
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r f; do
+            case "$f" in ./tests/dryrun.local.sh) continue ;; esac   # sourced, not run
+            if [ ! -x "$f" ]; then echo "FAIL not executable (git mode should be 100755): $f"; fail=1; fi
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' | sort)
+          exit "$fail"
+
+      - name: config/config.yaml matches the model list the k3s deployment serves
+        run: |
+          set -euo pipefail
+          expected=4876702dde54e214d71fd6724a303c3f9c70fec6
+          actual=$(git hash-object config/config.yaml)
+          echo "expected $expected"; echo "actual   $actual"
+          [ "$actual" = "$expected" ] || { echo "FAIL config/config.yaml drifted from the pinned k3s copy."; exit 1; }
+
+      - name: no cloudflared anywhere
+        run: |
+          set -euo pipefail
+          # The production tunnel token belongs to the k3s deployment; a second connector with
+          # the same token would split live traffic between two backends.
+          if grep -rniE '^Image=.*cloudflared|image:[[:space:]]*.*cloudflared' \
+               --exclude-dir=.github --include='*.container' --include='*.yml' --include='*.yaml' .; then
+            echo "FAIL a cloudflared container was added - see docs/k3s-to-podman.md"; exit 1
+          fi
+          echo "ok   no cloudflared container defined"
+
+      - name: no credential-shaped strings
+        run: |
+          set -euo pipefail
+          # Value-shaped, not name-shaped: the docs legitimately discuss these variable NAMES.
+          patterns='sk-or-v[0-9]+-[0-9a-zA-Z]{24,}|sk-[0-9a-f]{40,}|gh[pousr]_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----|postgres(?:ql)?://[^:\s]+:(?!CHANGE_ME|YOUR_|REPLACE|<)[^@\s]{12,}@'
+          if grep -rnIP "$patterns" --exclude-dir=.git .; then
+            echo "FAIL something credential-shaped is committed"; exit 1
+          fi
+          echo "ok   no credential-shaped strings found"
+
+      - name: only *.example env files are tracked
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files | grep -E '(^|/)\.env|\.env$' | grep -vE '\.example$|^tests/fixtures/' || true)
+          if [ -n "$bad" ]; then echo "FAIL a real env file is tracked:"; echo "$bad"; exit 1; fi
+          echo "ok   only config/*.env.example and tests/fixtures/*.env are tracked"
+
+      - name: every required file is present
+        run: |
+          set -euo pipefail
+          fail=0
+          for f in \
+            README.md README_zh-TW.md DEPLOYMENT.md DEPLOYMENT_zh-TW.md SKILL.md \
+            LICENSE .gitignore config/config.yaml config/litellm.env.example \
+            docs/architecture.md docs/k3s-to-podman.md \
+            quadlet/litellm.network quadlet/litellm-pgdata.volume quadlet/render-vars \
+            quadlet/litellm-postgres.container quadlet/litellm.container \
+            scripts/install.sh scripts/uninstall.sh scripts/upgrade.sh scripts/backup.sh \
+            scripts/restore.sh scripts/rotate-secrets.sh scripts/lib/quadlet-lib.sh \
+            tests/dryrun.sh tests/smoke.sh
+          do
+            if [ -s "$f" ]; then echo "ok   $f"; else echo "FAIL missing or empty: $f"; fail=1; fi
+          done
+          exit "$fail"
