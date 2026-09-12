@@ -31,10 +31,21 @@ jobs:
       - name: scripts are executable
         run: |
           set -euo pipefail
+          # The shebang decides, not a name list: a *.sh that starts with #! is run directly and
+          # must be 100755, while one without a shebang is sourced by another script and must
+          # stay 100644. tests/dryrun.local.sh is sourced by tests/dryrun.sh, and
+          # scripts/lib/quadlet-lib.sh is the shared library that Woow_quadlet_migration_plan's
+          # sync-lib.sh vendors as mode 644 by design - making either executable would claim
+          # they can be run on their own.
           fail=0
           while IFS= read -r f; do
-            case "$f" in ./tests/dryrun.local.sh) continue ;; esac   # sourced, not run
-            if [ ! -x "$f" ]; then echo "FAIL not executable (git mode should be 100755): $f"; fail=1; fi
+            if [ "$(head -c2 -- "$f")" = '#!' ]; then
+              if [ -x "$f" ]; then echo "ok   runnable, executable: $f"
+              else echo "FAIL has a #! but is not executable (git mode should be 100755): $f"; fail=1; fi
+            else
+              if [ -x "$f" ]; then echo "FAIL executable but has no #! line (sourced scripts stay 100644): $f"; fail=1
+              else echo "ok   sourced, not executable: $f"; fi
+            fi
           done < <(find . -type f -name '*.sh' -not -path './.git/*' | sort)
           exit "$fail"
 
