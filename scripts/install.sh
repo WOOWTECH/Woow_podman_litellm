@@ -144,7 +144,7 @@ ql_check_container_collision "$LL_CONTAINER" "$LL_UNIT"
 # The port must be free, unless our running container is the one already publishing it.
 published=$(sed -n 's/^PublishPort=//p' "$QDIR/$LL_CONTAINER.container" 2>/dev/null || true)
 if [[ $published != "$BIND:$PORT:4000" || $(systemctl --user is-active "$LL_UNIT" 2>/dev/null || true) != active ]] \
-  && command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q .; then
+  && command -v ss >/dev/null 2>&1 && [[ -n $(ss -ltnH "sport = :$PORT" 2>/dev/null || true) ]]; then
   ql_die "port $PORT is already in use on this host (ss -ltnp 'sport = :$PORT'); pick another with --port"
 fi
 
