@@ -37,3 +37,57 @@ done < <(sed -n 's/^Image=//p' "$REPO"/quadlet/*.container)
 # Loopback by default; no cloudflared anywhere (the k3s tunnel token must never be reused).
 if grep -qx 'LITELLM_BIND=127.0.0.1' "$REPO/config/litellm.env.example"; then local_ok "example binds 127.0.0.1"; else local_fail "config/litellm.env.example must default to LITELLM_BIND=127.0.0.1"; fi
 if grep -rniE '^Image=.*cloudflared' "$REPO/quadlet"; then local_fail "a cloudflared container is defined"; else local_ok "no cloudflared container"; fi
+
+# ------------------------------------------------------------------------------------------
+# Regression: --purge-images must never touch an image this package did not build.
+#
+# It used to collect the Image= lines of the installed and repo units, which for LiteLLM are
+# both PINNED UPSTREAM images (ghcr.io/berriai/litellm, docker.io/library/postgres), and
+# `podman rmi` them. On a test host that only untagged them, because production pins the
+# sibling tag postgres:16.15-alpine with the same image ID; on a host that pins this exact
+# tag it would delete a base image a live stack depends on. The omnigent and code-server
+# packages only ever remove their own localhost/* images; this now matches them.
+#
+# The test runs the real scripts/uninstall.sh --purge-images against a stub podman that
+# reports both upstream images as present, and fails if either is named for removal.
+purge_stub=$WORK/purge-images-stub
+mkdir -p "$purge_stub/bin" "$purge_stub/qdir" "$purge_stub/state"
+cat >"$purge_stub/bin/podman" <<'STUB'
+#!/usr/bin/env bash
+# Just enough podman for uninstall.sh --purge-images --dry-run. `images` reports the two
+# pinned upstream images as present on the host; `rmi` is a hard failure, because a dry run
+# must not reach it and a real run must never be asked to remove one of these.
+case ${1:-} in
+  --version) echo "podman version 4.9.3" ;;
+  images)
+    printf 'ghcr.io/berriai/litellm:v1.83.14-stable\n'
+    printf 'docker.io/library/postgres:16.15-alpine3.24\n'
+    printf 'docker.io/library/postgres:16.15-alpine\n'
+    ;;
+  image) [[ ${2:-} == exists ]] && exit 0 ;;
+  volume | secret | network) [[ ${2:-} == exists ]] && exit 1 ;;
+  rmi) echo "STUB-RMI ${*:2}" >&2; exit 0 ;;
+  ps) : ;;
+  *) : ;;
+esac
+exit 0
+STUB
+cat >"$purge_stub/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod 755 "$purge_stub/bin/podman" "$purge_stub/bin/systemctl"
+
+purge_out=$WORK/purge-images.out
+purge_rc=0
+PATH=$purge_stub/bin:$PATH \
+  QL_QUADLET_DIR=$purge_stub/qdir QL_STATE_ROOT=$purge_stub/state QL_CONFIG_ROOT=$purge_stub \
+  bash "$REPO/scripts/uninstall.sh" --purge-images --dry-run >"$purge_out" 2>&1 || purge_rc=$?
+if ((purge_rc != 0)); then
+  local_fail "uninstall.sh --purge-images --dry-run exited $purge_rc: $(tr '\n' ' ' <"$purge_out")"
+elif grep -qE 'would remove image (ghcr\.io|docker\.io|registry\.|quay\.)' "$purge_out" \
+  || grep -q 'STUB-RMI' "$purge_out"; then
+  local_fail "--purge-images names an upstream image for removal: $(grep -E 'image|STUB-RMI' "$purge_out" | tr '\n' ' ')"
+else
+  local_ok "--purge-images leaves the pinned upstream images alone"
+fi

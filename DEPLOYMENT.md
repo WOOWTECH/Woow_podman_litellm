@@ -266,8 +266,12 @@ smoke test and prints the `restore.sh` command for the pre-upgrade dump.
 ### 6.2 Old images
 
 `podman images | grep -E 'litellm|postgres'`, then `podman rmi <old tag>` once you are confident.
-`scripts/uninstall.sh --purge-images` removes only images that no container and no other installed
-Quadlet unit uses (the Postgres image is shared with other WOOWTECH stacks).
+`scripts/uninstall.sh --purge-images` removes only images this package built, and it builds none:
+the two images are pinned upstream (`ghcr.io/berriai/litellm`, `docker.io/library/postgres`) and are
+shared base images that another stack may pin under a sibling tag with the same image ID, so removing
+one here could delete a base image a live stack depends on. Kept for symmetry with the other packages;
+it is a no-op. Remove an upstream image yourself with `podman rmi` when you are sure — the
+Postgres image in particular is shared with other WOOWTECH stacks.
 
 ### 6.3 Resource limits
 
@@ -336,7 +340,7 @@ support this: it refuses to run as root by design. Ports below 1024 need rootful
 ```bash
 scripts/uninstall.sh                 # units and containers gone; volume, network, secrets, images, env kept
 scripts/uninstall.sh --purge         # + volume, network and secrets, after a final pg_dump + secrets.env
-scripts/uninstall.sh --purge-images  # + the two images, if nothing else uses them
+scripts/uninstall.sh --purge-images  # no-op: the two images are upstream and are never removed
 rm -rf ~/.config/litellm             # the env file is never deleted by the scripts
 ```
 

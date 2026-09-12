@@ -237,7 +237,7 @@ scripts/rotate-secrets.sh --db | --master                  # --salt 會被拒絕
 ```bash
 scripts/uninstall.sh                    # 停止並移除單元；保留資料庫、secret、映像
 scripts/uninstall.sh --purge            # 另外刪除 volume、network 與 secret，並先做最後一次備份
-scripts/uninstall.sh --purge-images     # 另外移除兩個固定版本映像（前提是沒有別的東西在用）
+scripts/uninstall.sh --purge-images     # 此套件不建映像，兩個上游映像一律不動，等同空操作
 ```
 
 `--purge` 是這些腳本刪除資料的唯一方式；它會要求輸入應用名稱確認（`--yes` 可略過）。

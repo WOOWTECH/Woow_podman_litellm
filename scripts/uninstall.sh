@@ -8,8 +8,9 @@
 #                                          secrets, after a final backup (pg_dump + secrets.env)
 #                                          to ~/backups/litellm/. The ONLY way this repo deletes
 #                                          data.
-#   scripts/uninstall.sh --purge-images    also remove the two pinned images, each only when no
-#                                          container and no other installed unit uses it
+#   scripts/uninstall.sh --purge-images    also remove images this package built. It builds
+#                                          none: LiteLLM runs pinned upstream images, and
+#                                          those are never removed here
 #   scripts/uninstall.sh --dry-run         report what would be removed
 #
 # Never deleted here: ~/.config/litellm/litellm.env (delete it yourself after --purge).
@@ -24,6 +25,13 @@ APP=litellm
 VOLUME=litellm-pgdata
 BACKUP_DIR=$HOME/backups/$APP
 QDIR=${QL_QUADLET_DIR:-$HOME/.config/containers/systemd}
+# --purge-images only ever removes images THIS package built, exactly like the omnigent and
+# code-server packages. LiteLLM builds none: it runs pinned upstream images
+# (ghcr.io/berriai/litellm, docker.io/library/postgres). Those are shared base images that
+# other stacks pin too -- frequently under a sibling tag with the same image ID, where
+# `podman rmi` only untags and the damage stays invisible -- so removing one from here can
+# delete a base image a live stack depends on.
+IMAGE_REPO=localhost/woow-litellm
 # ------------------------------------------------------------------------------------------
 
 purge=0 yes=0 purge_images=0
@@ -42,8 +50,9 @@ export QL_APP=$APP
 DRY=${QL_DRY_RUN:-0}
 ql_require_rootless
 ql_lock "$APP"
-# the images the installed (or, when not installed, the repo's) units pin
-mapfile -t images < <(sed -n 's/^Image=//p' "$QDIR"/litellm*.container "$REPO"/quadlet/*.container 2>/dev/null | sort -u)
+# the upstream images the installed (or, when not installed, the repo's) units pin: reported,
+# never removed
+mapfile -t upstream < <(sed -n 's/^Image=//p' "$QDIR"/litellm*.container "$REPO"/quadlet/*.container 2>/dev/null | sort -u)
 
 if ((purge)); then
   if ((!yes)) && [[ $DRY != 1 ]]; then
@@ -70,12 +79,18 @@ else
 fi
 
 if ((purge_images)); then
-  for img in "${images[@]}"; do
+  mapfile -t imgs < <(podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E "^${IMAGE_REPO}:" || true)
+  if ((${#imgs[@]} == 0)); then
+    ql_info "--purge-images: nothing to remove; this package builds no image, and the pinned upstream images it runs (${upstream[*]:-none}) are shared and are left alone"
+  fi
+  for img in "${imgs[@]}"; do
     [[ -n $img ]] || continue
     users=$(podman ps -a --filter "ancestor=$img" --format '{{.Names}}' 2>/dev/null || true)
     if [[ -n $users ]]; then ql_warn "keeping image $img: used by ${users//$'\n'/ }"; continue; fi
-    if grep -lx "Image=$img" "$QDIR"/*.container 2>/dev/null | grep -q .; then
-      ql_warn "keeping image $img: another installed unit uses it ($(grep -lx "Image=$img" "$QDIR"/*.container | tr '\n' ' '))"
+    # `grep -l ... | grep -q .`: the producer would be killed by SIGPIPE under pipefail.
+    holders=$(grep -lx "Image=$img" "$QDIR"/*.container 2>/dev/null || true)
+    if [[ -n $holders ]]; then
+      ql_warn "keeping image $img: another installed unit uses it (${holders//$'\n'/ })"
       continue
     fi
     podman image exists "$img" || continue

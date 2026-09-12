@@ -250,7 +250,7 @@ salt fingerprint differs from this host's unless you pass `--with-secrets`.
 ```bash
 scripts/uninstall.sh                    # stop and remove the units; keep the database, secrets, images
 scripts/uninstall.sh --purge            # also delete the volume, network and secrets, after a final backup
-scripts/uninstall.sh --purge-images     # also remove the two pinned images if nothing else uses them
+scripts/uninstall.sh --purge-images     # no-op here: the two images are upstream and are never removed
 ```
 
 `--purge` is the only way these scripts delete data; it asks you to type the app name (`--yes`

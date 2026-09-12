@@ -248,8 +248,11 @@ scripts/upgrade.sh
 ### 6.2 舊映像
 
 `podman images | grep -E 'litellm|postgres'`，確認無誤後 `podman rmi <舊 tag>`。
-`scripts/uninstall.sh --purge-images` 只會移除「沒有容器、也沒有其他已安裝 Quadlet 單元在用」的
-映像（Postgres 映像與其他 WOOWTECH 堆疊共用）。
+`scripts/uninstall.sh --purge-images` 只會移除「本套件自己建置」的映像，而本套件不建置任何映像：
+兩個映像都是上游固定版本（`ghcr.io/berriai/litellm`、`docker.io/library/postgres`），是共用的 base
+image，別的堆疊可能用同一個 image ID 的姊妹 tag 釘住它，從這裡移除可能刪掉線上服務依賴的 base
+image。保留此旗標只是與其他套件對稱，實際上是空操作；確定要刪請自己用 `podman rmi` —— 特別是
+Postgres 映像與其他 WOOWTECH 堆疊共用。
 
 ### 6.3 資源上限
 
@@ -316,7 +319,7 @@ Volume=/etc/litellm/config.yaml:/app/config.yaml:ro,Z
 ```bash
 scripts/uninstall.sh                 # 移除單元與容器；保留 volume、network、secret、映像、env 檔
 scripts/uninstall.sh --purge         # 另外刪除 volume、network 與 secret，並先做 pg_dump + secrets.env
-scripts/uninstall.sh --purge-images  # 另外移除兩個映像（前提是沒有別的東西在用）
+scripts/uninstall.sh --purge-images  # 空操作：兩個映像都是上游映像，一律不移除
 rm -rf ~/.config/litellm             # 腳本永遠不會刪除 env 檔
 ```
 
