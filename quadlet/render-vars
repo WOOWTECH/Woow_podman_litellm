@@ -1,0 +1,6 @@
+# Variables scripts/install.sh may substitute into quadlet/* (D2: rendered at install time).
+# Values come from ~/.config/litellm/litellm.env; a token that is not listed here, or
+# listed but unset, stops the install before anything is written.
+LITELLM_BIND
+LITELLM_PORT
+LITELLM_LOG

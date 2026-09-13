@@ -7,22 +7,17 @@ config file, and exactly one port reachable from outside the stack.
 
 This document describes **what the files in this repository actually declare** —
 every container name, volume name, network name, port and path below was taken
-from `docker-compose.yml`, `config/config.yaml` and the units in `quadlet/`, not
-from a template. Nothing here was executed against a live Podman host, so the
-behaviour described is documented behaviour, not measured behaviour.
+from `config/config.yaml` and the units in `quadlet/`, not from a template.
+Nothing here has been executed against a live Podman host yet, so the behaviour
+described is documented behaviour, not measured behaviour.
 
-Two deployment paths ship in this repo and they are architecturally identical:
-
-| | Path A | Path B |
-|---|---|---|
-| Driver | `docker-compose.yml` via `podman-compose` (or Portainer) | `quadlet/*.container` / `*.volume` / `*.network` via `systemd --user` |
-| Network name | `litellm-network` (compose prefixes it with the project name) | `litellm-net` |
-| Volume name | `pgdata` (compose prefixes it with the project name) | `litellm-pgdata` |
-| Published port | `${LITELLM_PORT:-4000}:4000` — **all host interfaces** | `127.0.0.1:4000:4000` — **loopback only** |
-| Boot persistence | Podman/compose restart policy | systemd `[Install]` + `loginctl enable-linger` |
-
-The network and volume names differ **on purpose**: the two paths must never end
-up writing into the same Postgres data directory.
+One deployment path ships in this repo: **Quadlet units under `systemd --user`**,
+installed by `scripts/install.sh`. The per-host values (publish address and port,
+log level) are rendered into the units at install time from
+`~/.config/litellm/litellm.env`; the defaults are `127.0.0.1:4000`, the network is
+`litellm-net` and the volume is `litellm-pgdata`. The compose path that used to
+ship alongside it was removed (README, "Docker and compose"); its last commit is
+tagged `compose-final`.
 
 Sister repositories:
 
@@ -39,12 +34,12 @@ flowchart TB
 
     subgraph host["Podman host"]
         direction TB
-        pub["Published port 4000<br/>compose path binds 0.0.0.0:4000<br/>quadlet path binds 127.0.0.1:4000"]
-        cfg["Host file config.yaml<br/>compose ./config/config.yaml<br/>quadlet HOME/.config/litellm/config.yaml"]
-        envf["Host env file, mode 0600<br/>compose .env<br/>quadlet HOME/.config/litellm/litellm.env"]
-        vol[("Named volume<br/>compose pgdata<br/>quadlet litellm-pgdata")]
+        pub["Published port, default 127.0.0.1:4000<br/>rendered from litellm.env"]
+        cfg["Host file HOME/.config/litellm/config.yaml"]
+        envf["Host env file, mode 0600<br/>HOME/.config/litellm/litellm.env<br/>(install-time input only)"]
+        vol[("Named volume litellm-pgdata")]
 
-        subgraph net["Podman bridge network<br/>compose litellm-network, quadlet litellm-net"]
+        subgraph net["Podman bridge network litellm-net"]
             direction TB
             proxy["Container litellm<br/>ghcr.io/berriai/litellm v1.83.14-stable<br/>listens on 4000 inside the network"]
             db["Container litellm-postgres<br/>postgres 16-alpine<br/>listens on 5432 inside the network<br/>NO host port published"]
@@ -67,11 +62,10 @@ flowchart TB
 
 Points the diagram is making:
 
-- **Postgres publishes nothing.** In `docker-compose.yml` it has `expose: ["5432"]`
-  and no `ports:` key; the Quadlet unit has no `PublishPort=` at all. The database
-  is reachable only from inside the Podman network, by the container name
-  `litellm-postgres` (compose additionally gives it the alias `postgres`, the
-  Quadlet unit sets `PodmanArgs=--network-alias=postgres`).
+- **Postgres publishes nothing.** Its unit has no `PublishPort=` at all, so the
+  database is reachable only from inside the Podman network, by the container name
+  `litellm-postgres` (the old `--network-alias=postgres` is gone with compose: the
+  connection string uses the container name).
 - **A user-defined network is mandatory, not cosmetic.** Podman's default `podman`
   network has no DNS. Container-name resolution — which is what
   `DATABASE_URL=postgresql://litellm:...@litellm-postgres:5432/litellm` depends on —
@@ -95,12 +89,12 @@ Points the diagram is making:
   PODMAN HOST  ==========================================================
   |                                                                     |
   |   published port 4000                                               |
-  |     compose : 0.0.0.0:4000 -> 4000     (all interfaces)             |
+  |     default : 127.0.0.1:4000 -> 4000  (rendered from litellm.env)    |
   |     quadlet : 127.0.0.1:4000 -> 4000   (loopback only)              |
   |                              |                                      |
   |   +--------------------------|---------------------------------+    |
   |   | PODMAN BRIDGE NETWORK    |                                  |    |
-  |   |   compose: litellm-network   quadlet: litellm-net           |    |
+  |   |   bridge network: litellm-net                                |    |
   |   |                          v                                  |    |
   |   |   +----------------------------------------------------+    |    |
   |   |   |  container: litellm                                |    |    |
@@ -122,7 +116,7 @@ Points the diagram is making:
   |                       v                         |                    |
   |          +-------------------------+   +--------+------------------+ |
   |          |  named volume           |   | host file config.yaml     | |
-  |          |  compose: pgdata        |   | + host env file (0600)    | |
+  |          |  volume: litellm-pgdata |   | + podman secrets          | |
   |          |  quadlet: litellm-pgdata|   +---------------------------+ |
   |          |  PGDATA=/var/lib/       |                                 |
   |          |   postgresql/data/pgdata|                                 |
@@ -148,7 +142,7 @@ Both paths enforce that, with different mechanisms but the same shape.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant MGR as Supervisor - systemd user manager or podman-compose
+    participant MGR as systemd user manager
     participant VOL as Named volume
     participant PG as litellm-postgres
     participant LLM as litellm
@@ -162,7 +156,7 @@ sequenceDiagram
         PG-->>MGR: not accepting connections yet
     end
     PG-->>MGR: pg_isready succeeds, container reported healthy
-    Note over MGR,PG: THE GATE - compose uses depends_on condition service_healthy,<br/>quadlet uses Notify=healthy plus the litellm-wait-postgres oneshot fallback
+    Note over MGR,PG: THE GATE - litellm-postgres.service stays in activating (start-post)<br/>until its ExecStartPost= loop sees pg_isready succeed over TCP
     MGR->>LLM: start the proxy container
     LLM->>LLM: read /app/config.yaml and resolve os.environ references
     LLM->>PG: schema step - prisma migrate deploy, DISABLE_SCHEMA_UPDATE is false
@@ -183,23 +177,23 @@ sequenceDiagram
 
 Notes on the gate:
 
-- **Compose path** — `depends_on: postgres: condition: service_healthy`. This needs
-  Podman >= 4.6 and podman-compose >= 1.3; on older toolchains the condition is
-  ignored and the proxy races the database.
-- **Quadlet path** — `litellm-postgres.container` sets `Notify=healthy` (Podman
-  5.0+), so `litellm-postgres.service` is only reported *active* once `pg_isready`
-  passes. `litellm.container` then has `Requires=` + `After=litellm-postgres.service`.
-  For Podman 4.4–4.9, where `Notify=healthy` does not exist, the repo also ships
-  `quadlet/litellm-wait-postgres.service`, a plain systemd `Type=oneshot` unit that
-  runs a throwaway `postgres:16-alpine` container **on the same network** and polls
-  `pg_isready -h litellm-postgres` 60 times at 3s intervals. It is pulled in with
-  `Wants=`, so it is harmless when absent and belt-and-braces when present.
-- **Two probe phases.** Podman is richer than compose here: `HealthStartupCmd`
+- **The gate is `ExecStartPost=` on `litellm-postgres.service`**: a
+  `timeout 240 sh -c 'until podman exec litellm-postgres pg_isready -h 127.0.0.1 ...'`
+  loop. systemd keeps the unit in `activating (start-post)` until that returns, so
+  `litellm.container`'s `Requires=` + `After=litellm-postgres.service` really waits
+  for a database that accepts TCP connections.
+- **`Notify=healthy` is not used.** podman 4.9.3 accepts the key and ignores it: the
+  generated unit gets `--sdnotify=conmon`, so "started" would mean "the container
+  started", not "the database answers". The earlier `litellm-wait-postgres.service`
+  oneshot (a throwaway container polling from the same network, pulled in with a soft
+  `Wants=`) is gone with it: the same probe now lives where it gates every dependent.
+- **`-h 127.0.0.1` on the probe.** During first-boot init the Postgres entrypoint runs
+  a temporary server on the unix socket only; a socket probe reports ready too early.
+- **Two probe phases.** `HealthStartupCmd`
   (the k8s `startupProbe` analogue) points at `/health/readiness`, which is
   database-aware and covers image extraction plus the first Prisma migration;
   `HealthCmd` (the `livenessProbe` analogue) points at `/health/liveliness`, a pure
-  process-alive check. The compose file can only express the single steady-state
-  check, so it uses `/health/liveliness` with `start_period: 120s`.
+  process-alive check with `HealthStartPeriod=120s` behind it.
 - **Never probe plain `/health`.** That endpoint requires a valid key *and* fires a
   real request at every configured model — probing it would burn OpenRouter credits
   on every interval.
@@ -264,47 +258,36 @@ does not support instead of failing the request.
 
 ---
 
-## 4. The two deployment paths
+## 4. The deployment path
 
 ```mermaid
 flowchart TB
-    subgraph shared["Shared inputs - one source of truth for both paths"]
+    subgraph inputs["Inputs - one source of truth"]
         direction TB
         i1["Image ghcr.io/berriai/litellm v1.83.14-stable"]
-        i2["Image postgres 16-alpine"]
+        i2["Image postgres 16.15-alpine3.24"]
         i3["config/config.yaml - no secrets, only os.environ references"]
-        i4["Secrets supplied as environment variables at run time"]
+        i4["HOME/.config/litellm/litellm.env (0600) - per-host values and the keys"]
     end
 
-    subgraph pa["Path A - podman-compose or Portainer"]
+    subgraph install["scripts/install.sh"]
         direction TB
-        a1["docker-compose.yml"]
-        a2["podman-compose up -d"]
-        a3["Containers litellm and litellm-postgres<br/>network litellm-network<br/>volume pgdata<br/>port 4000 on every host interface<br/>restart unless-stopped<br/>config from ./config/config.yaml<br/>secrets from ./.env"]
+        s1["render quadlet/*.container|volume|network<br/>replacing the @@VAR@@ tokens from litellm.env"]
+        s2["validate: quadlet -dryrun -user + systemd-analyze --user verify"]
+        s3["pull images, create the five podman secrets,<br/>install only changed files, restart only their units"]
     end
 
-    subgraph pb["Path B - Quadlet under the systemd user manager"]
+    subgraph running["Result"]
         direction TB
-        b1["quadlet/litellm.network<br/>quadlet/litellm-pgdata.volume<br/>quadlet/litellm-postgres.container<br/>quadlet/litellm.container<br/>quadlet/litellm-wait-postgres.service"]
-        b2["quadlet/install.sh<br/>then systemctl --user daemon-reload"]
-        b3["Units litellm-network.service, litellm-pgdata-volume.service,<br/>litellm-postgres.service, litellm.service<br/>network litellm-net, volume litellm-pgdata<br/>port 4000 on loopback only<br/>Restart=always, starts at boot with linger enabled<br/>config and secrets from HOME/.config/litellm"]
+        r1["Units litellm-network.service, litellm-pgdata-volume.service,<br/>litellm-postgres.service, litellm.service<br/>network litellm-net, volume litellm-pgdata<br/>port on the configured address only<br/>Restart=always, starts at boot with linger enabled"]
     end
 
-    shared --> a1
-    shared --> b1
-    a1 --> a2
-    a2 --> a3
-    b1 --> b2
-    b2 --> b3
-
-    a3 -.->|"same images, same config, same schema"| b3
+    inputs --> s1 --> s2 --> s3 --> r1
 ```
 
-Choose Path A when you want a stack you can paste into Portainer, tear down with
-one command, or hand to somebody who already knows Compose. Choose Path B when the
-gateway must come back after a reboot without anybody logging in, when you want
-`journalctl` and `systemctl status` as the operational interface, and when you want
-the two-phase health probes.
+The units in `quadlet/` are the source of truth and the installed copies are byte-identical
+to the rendered result, so `scripts/install.sh` can tell a local edit from an upgrade and
+back up anything it is about to overwrite.
 
 ### Quadlet unit-name derivation
 
@@ -345,8 +328,8 @@ for three reasons:
 2. Its supported subset of the Kubernetes API is partial and moves between Podman
    releases; probes, resource limits and volume semantics do not map cleanly, so the
    file would look like a k8s manifest while behaving differently.
-3. It would be a third thing to keep in sync with `config.yaml` and the images, with no
-   capability that Compose or Quadlet lacks.
+3. It would be a second thing to keep in sync with `config.yaml` and the images, with no
+   capability Quadlet lacks.
 
 Anyone who wants it can generate a starting point with `podman generate kube` from a
 running stack; this repo does not carry one.
@@ -357,23 +340,24 @@ running stack; this repo does not carry one.
 
 | Component | Image | Container name | Listens on | Published to host? | Volume / mount | Healthcheck | Restart policy |
 |---|---|---|---|---|---|---|---|
-| LiteLLM proxy | `ghcr.io/berriai/litellm:v1.83.14-stable` | `litellm` | `4000/tcp` | **Yes.** compose `${LITELLM_PORT:-4000}:4000` on all interfaces; Quadlet `127.0.0.1:4000:4000` loopback only | `config.yaml` bind-mounted read-only at `/app/config.yaml` (`ro,Z`); no data volume | Compose: `python -c ... /health/liveliness`, interval 20s / timeout 10s / retries 6 / start_period 120s. Quadlet adds a startup phase against `/health/readiness`, 15s × 40 | compose `unless-stopped`; Quadlet `Restart=always`, `RestartSec=10`, `HealthOnFailure=kill` |
-| PostgreSQL | `postgres:16-alpine` (Quadlet: `docker.io/library/postgres:16-alpine`) | `litellm-postgres` (network alias `postgres`) | `5432/tcp` | **No.** compose uses `expose:` only; Quadlet has no `PublishPort=` | named volume at `/var/lib/postgresql/data`, `PGDATA=/var/lib/postgresql/data/pgdata` | `pg_isready -U litellm -d litellm`, interval 10s / timeout 5s / start_period 10s (compose retries 5, Quadlet retries 3) | compose `unless-stopped`; Quadlet `Restart=always`, `RestartSec=10`, `Notify=healthy`, `HealthOnFailure=kill` |
-| Bridge network | n/a | n/a | n/a | n/a | compose `litellm-network` (driver `bridge`); Quadlet `litellm-net` | n/a | created by compose / by `litellm-network.service` |
-| Database volume | n/a | n/a | n/a | n/a | compose `pgdata` (driver `local`); Quadlet `litellm-pgdata` | n/a | survives `podman-compose down` and `systemctl --user stop`; only an explicit volume removal destroys it |
-| Postgres wait shim (Quadlet only, optional) | `docker.io/library/postgres:16-alpine` | `litellm-wait-postgres` (throwaway, `--rm`) | n/a | No | none | is itself the check: 60 × 3s `pg_isready -h litellm-postgres` | `Type=oneshot`, `RemainAfterExit=yes`, `TimeoutStartSec=300` |
+| LiteLLM proxy | `ghcr.io/berriai/litellm:v1.83.14-stable` | `litellm` | `4000/tcp` | **Yes**, at the rendered `LITELLM_BIND:LITELLM_PORT` (default `127.0.0.1:4000`) | `config.yaml` bind-mounted read-only at `/app/config.yaml` (`ro,Z`); no data volume | startup phase `/health/readiness` 15s × 40, then `/health/liveliness` 20s / 10s / 6, start period 120s | `Restart=always`, `RestartSec=10`, `HealthOnFailure=kill` |
+| PostgreSQL | `docker.io/library/postgres:16.15-alpine3.24` | `litellm-postgres` | `5432/tcp` | **No** `PublishPort=` at all | named volume at `/var/lib/postgresql/data`, `PGDATA=/var/lib/postgresql/data/pgdata` | `pg_isready -h 127.0.0.1 -U litellm -d litellm`, 10s / 5s / 3, start period 60s, plus the `ExecStartPost=` gate | `Restart=always`, `RestartSec=10`, `HealthOnFailure=kill` |
+| Bridge network | n/a | n/a | n/a | n/a | `litellm-net` (driver `bridge`) | n/a | created by `litellm-network.service` |
+| Database volume | n/a | n/a | n/a | n/a | `litellm-pgdata` | n/a | survives `systemctl --user stop` and `scripts/uninstall.sh`; only `--purge` (or an explicit `podman volume rm`) destroys it |
 
-Resource limits: Postgres 1 GiB / 1.0 CPU, LiteLLM 2 GiB / 2.0 CPU on both paths
-(compose `mem_limit`/`cpus`; Quadlet `PodmanArgs=--memory=` / `--cpus=`), matching the
+Resource limits: Postgres 1 GiB / 1.0 CPU, LiteLLM 2 GiB / 2.0 CPU
+(`PodmanArgs=--memory=` / `--cpus=`), matching the
 k3s limits exactly. **Rootless caveat:** the `cpu` and `cpuset` cgroup controllers are
 not delegated to user slices by default, so `--cpus` can be silently ineffective —
 verify with `podman stats` before relying on it.
 
-Operational scripts: `scripts/smoke-test.sh` (read-only checks against a running
-stack), `scripts/backup.sh` (timestamped archive with `MANIFEST.txt`, a `pg_dump` in
-custom format, and a copy of `config.yaml` — deliberately **without** the env file),
-and `scripts/restore.sh` (destructive: drops and recreates the database, and refuses
-to proceed on a confirmed `LITELLM_SALT_KEY` fingerprint mismatch).
+Operational scripts: `tests/smoke.sh` (read-only checks against a running stack, also
+run at the end of every install), `scripts/backup.sh` (a timestamped directory with a
+custom-format `pg_dump`, `secrets.env`, a salt fingerprint and copies of `litellm.env`
+and `config.yaml`), `scripts/restore.sh` (destructive: drops and recreates the
+database, and refuses to proceed on a confirmed `LITELLM_SALT_KEY` fingerprint
+mismatch), `scripts/upgrade.sh` (snapshot, dump, install, smoke, automatic rollback)
+and `scripts/rotate-secrets.sh`.
 
 ---
 
@@ -406,7 +390,7 @@ Written by LiteLLM through Prisma, created on first start by the schema step:
 
 **`config.yaml` contains no secret values.** It contains `os.environ/NAME` references
 that LiteLLM resolves at start-up from the environment. That is precisely why the same
-file works unchanged on k3s, on Compose and under Quadlet — and why this repo mounts
+file works unchanged on k3s and under Quadlet — and why this repo mounts
 one file rather than maintaining a duplicated copy inside a ConfigMap, which is a
 standing hand-sync hazard in the k3s repo.
 
@@ -430,11 +414,12 @@ accordingly.
 
 | Action | Database volume | Config | Secrets |
 |---|---|---|---|
-| `podman-compose restart` / `systemctl --user restart litellm.service` | kept | re-read from the host file | re-read from the env file |
-| `podman-compose down` / `systemctl --user stop` | **kept** | untouched | untouched |
-| `podman-compose down -v` / `podman volume rm` | **destroyed** | untouched | untouched |
-| `quadlet/uninstall.sh` without flags | kept | kept | kept |
-| `quadlet/uninstall.sh --purge-data` | **destroyed** (typed confirmation required) | kept | kept |
+| `systemctl --user restart litellm.service` | kept | re-read from the host file | re-read from the podman secrets |
+| `systemctl --user stop ...` | **kept** | untouched | untouched |
+| `scripts/install.sh` (any re-run) | kept | rewritten when it changed | created only when missing; the salt key is never replaced |
+| `scripts/uninstall.sh` | kept | kept (the env file and `config.yaml` stay) | kept |
+| `scripts/uninstall.sh --purge` | **destroyed** after a final `pg_dump` (typed confirmation, or `--yes`) | the env file is kept | **destroyed** |
+| `podman volume rm litellm-pgdata` | **destroyed** | untouched | untouched |
 
 ---
 
@@ -442,11 +427,9 @@ accordingly.
 
 ### What is exposed
 
-- **Port 4000 only.** On the Quadlet path it is bound to `127.0.0.1` and is therefore
-  unreachable from the LAN without a deliberate change. On the Compose path
-  `${LITELLM_PORT:-4000}:4000` binds **every** host interface — `docker-compose.yml`
-  ships a commented `127.0.0.1:${LITELLM_PORT:-4000}:4000` alternative; use it unless
-  you actually want the LAN to reach the Admin UI and the `/v1` API.
+- **The proxy's port only**, bound to `127.0.0.1` by default and therefore unreachable
+  from the LAN without a deliberate change (`scripts/install.sh --bind <address>`,
+  which warns when the address is not loopback).
 - Rootless publishing of port 4000 needs no privilege; only ports below 1024 do.
 
 ### What is not exposed
@@ -471,30 +454,30 @@ network, changing the bind address to `0.0.0.0`.
 
 ### Where secrets live at rest
 
-| Secret | Compose path | Quadlet path |
-|---|---|---|
-| `OPENROUTER_API_KEY` | `.env` in the repo directory (git-ignored) | `~/.config/litellm/litellm.env`, file mode 0600 in a 0700 directory, **outside the git tree** |
-| `LITELLM_MASTER_KEY` | same | same |
-| `LITELLM_SALT_KEY` | same | same |
-| `POSTGRES_PASSWORD` / `DATABASE_URL` | same | same |
-| Provider credentials entered in the Admin UI | encrypted in Postgres, inside the named volume | same |
-| Virtual keys issued to clients | hashed/stored in Postgres | same |
+| Secret | Where it lives at rest |
+|---|---|
+| `OPENROUTER_API_KEY`, `LITELLM_MASTER_KEY`, `LITELLM_SALT_KEY` | podman secrets, created by `scripts/install.sh` from `~/.config/litellm/litellm.env` (0600, outside the git tree). You may blank the env file afterwards |
+| the database password | the podman secret `litellm-postgres-password`; Postgres reads it as a **file**, so it is not in `podman inspect` |
+| `DATABASE_URL` | the podman secret `litellm-database-url`, derived from that password on every install |
+| Provider credentials entered in the Admin UI | encrypted in Postgres, inside the named volume (with the salt key) |
+| Virtual keys issued to clients | hashed/stored in Postgres |
 
 Rules this repo enforces:
 
-- **No real credential is ever written into any tracked file.** The templates carry
-  placeholders only — `sk-or-REPLACE_ME`, `CHANGE_ME_TO_SECURE_PASSWORD`,
-  `os.environ/...`. `.gitignore` blocks `.env`, `.env.*` (except the two `.example`
-  templates), `*.env`, `secrets/`, `*.key`, `*.pem`.
-- Both env templates use `${VAR:?message}`-style hard failures in
-  `docker-compose.yml`, so the stack refuses to start rather than coming up with an
-  empty master key.
+- **No real credential is ever written into any tracked file.** The template carries
+  placeholders only (`REPLACE_ME`, `os.environ/...`). `.gitignore` blocks `.env`,
+  `.env.*`, `*.env` (except `*.env.example` and the dry-run fixtures), `secrets/`,
+  `*.key`, `*.pem`; CI greps for credential-shaped strings on every push.
+- `scripts/install.sh` refuses to install without an OpenRouter key, and every unit
+  it renders is checked for unresolved tokens before anything is written, so the
+  stack cannot come up with an empty master key.
 - **A `pg_dump` of this database contains every virtual key row and every encrypted
   provider credential.** `.gitignore` therefore blocks `backups/`, `*.sql`, `*.sql.gz`,
   `*.dump`, `*.tar`, `*.tar.gz`, `*.tgz`, `*.zip`. Treat a dump as a secret in its own
   right and store it where you would store a password vault export.
-- `scripts/backup.sh` deliberately does **not** copy `.env` / `litellm.env` into the
-  archive. Backups get copied around; secrets should not ride along with them.
+- `scripts/backup.sh` writes `secrets.env` (salt and master key, 0600) **next to** the
+  dump, because a dump without its salt key is unrestorable. Treat the whole backup
+  directory as a credential and keep it off this host.
 
 ### The `LITELLM_SALT_KEY` warning
 
@@ -512,9 +495,11 @@ Rules this repo enforces:
 >   **not** a backup archive.
 > - Back it up **separately** from the database dump. A dump without its matching salt
 >   key is useless: it is nothing but ciphertext.
-> - `scripts/restore.sh` compares a salt-key fingerprint recorded in the archive's
->   `MANIFEST.txt` against the target stack's current key and **refuses to run** on a
->   confirmed mismatch. Do not defeat that check.
+> - `scripts/restore.sh` compares the archive's `salt.fingerprint` against the target
+>   stack's current key and **refuses to run** on a confirmed mismatch, unless you pass
+>   `--with-secrets`, which also installs the archive's salt key. `install.sh` refuses a
+>   salt key in the env file that differs from the existing secret, and
+>   `rotate-secrets.sh --salt` refuses outright.
 > - If `LITELLM_SALT_KEY` is left unset, LiteLLM silently falls back to
 >   `LITELLM_MASTER_KEY`. That means rotating the master key would then also destroy
 >   every stored credential. Always set both, explicitly and separately.

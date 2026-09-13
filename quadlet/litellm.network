@@ -1,53 +1,12 @@
-# =============================================================================
-# litellm.network - user-defined Podman bridge network for the LiteLLM gateway
-# WOOWTECH / Woow_podman_litellm
-# -----------------------------------------------------------------------------
-# Generated systemd unit : litellm-network.service   (.network -> <name>-network.service)
-# Resulting Podman network: litellm-net              (because NetworkName= is set)
-#
-# WHY NetworkName= IS SET EXPLICITLY
-#   Quadlet names the Podman resource "systemd-<unitfilename>" by default, so
-#   WITHOUT this key the network would literally be called "systemd-litellm".
-#   Every `podman network inspect ...` line in the README would then have to use
-#   that surprising name. NetworkName= overrides it. Note that this changes ONLY
-#   the Podman resource name - the .container units still reference this unit by
-#   its FILENAME (Network=litellm.network); Quadlet resolves the real name.
-#
-# WHY A USER-DEFINED NETWORK IS MANDATORY (not a style choice)
-#   Podman's built-in default network, named "podman", is memory-only and does
-#   NOT perform container-to-container DNS resolution (kept that way for Docker
-#   backwards compatibility). Only a user-defined bridge network gets
-#   netavark + aardvark-dns name resolution, which is what lets the proxy reach
-#   the database at the hostname "litellm-postgres". On the default network the
-#   DATABASE_URL would fail to resolve.
-#
-# DO NOT set Internal=true here: LiteLLM must reach https://openrouter.ai .
-# DO NOT set DisableDNS=true here: it would break litellm -> litellm-postgres.
-#
-# Referencing this unit from a .container automatically injects BOTH
-# Requires=litellm-network.service and After=litellm-network.service into the
-# generated service, so the containers can never start before the network
-# exists. You do not need to hand-write those dependencies.
-# =============================================================================
-
+# Private bridge for litellm and litellm-postgres. Containers resolve each other by
+# name (aardvark-dns), so DATABASE_URL points at litellm-postgres:5432. NetworkName= keeps
+# the name "litellm-net" instead of Quadlet's default "systemd-litellm".
 [Unit]
 Description=Podman network for the WOOWTECH LiteLLM gateway
 
 [Network]
-# Explicit name -> `podman network ls` shows "litellm-net", not "systemd-litellm".
 NetworkName=litellm-net
-
-# bridge is the Quadlet default, stated here for readability.
 Driver=bridge
-
-# Informational metadata only. Nothing in Podman *selects* on labels - unlike
-# Kubernetes there is no Service/selector mechanism - but they make
-# `podman network ls --filter label=...` and cleanup scripts possible.
 Label=app=litellm
 Label=io.woowtech.stack=litellm-gw
-Label=app.kubernetes.io/part-of=woow-litellm
-
-# OPTIONAL - pin the subnet if 10.89.x.x collides with something on your LAN.
-# Both keys are repeatable; Gateway= requires a matching Subnet=.
-#Subnet=10.89.42.0/24
-#Gateway=10.89.42.1
+Label=io.woowtech.app=litellm

@@ -1,59 +1,14 @@
-# =============================================================================
-# litellm-pgdata.volume - persistent storage for the LiteLLM Postgres database
-# WOOWTECH / Woow_podman_litellm
-# -----------------------------------------------------------------------------
-# Generated systemd unit : litellm-pgdata-volume.service  (.volume -> <name>-volume.service)
-# Resulting Podman volume: litellm-pgdata                 (because VolumeName= is set)
-#
-# WHY VolumeName= IS SET EXPLICITLY
-#   Same reason as the .network unit: Quadlet's default resource name is
-#   "systemd-<unitfilename>", so without this key the volume would be called
-#   "systemd-litellm-pgdata" and every documented `podman volume` command would
-#   have to use that name. VolumeName= pins it to "litellm-pgdata".
-#   The .container unit still references this file by FILENAME
-#   (Volume=litellm-pgdata.volume:/var/lib/postgresql/data).
-#
-# WHY A NAMED VOLUME AND NOT A ROOTLESS BIND MOUNT
-#   Under rootless Podman the container's UID 70 (the "postgres" user inside
-#   postgres:16-alpine) is mapped through a user namespace onto a high subuid on
-#   the host. A host directory created by your login user therefore shows up
-#   inside the container as owned by "nobody", and the Postgres entrypoint
-#   refuses to start with a data-directory-ownership error. A Podman NAMED
-#   volume is initialised by Podman with the image's declared ownership, so this
-#   whole class of failure simply does not occur.
-#   If you insist on a bind mount, you must additionally either use the ":U"
-#   mount option or run `podman unshare chown -R 70:70 /path/to/dir` first, and
-#   on SELinux hosts add ":Z". That variant is unsupported here.
-#
-# NO CAPACITY CEILING EXISTS
-#   The k3s stack declares a 5Gi PersistentVolumeClaim. A Podman named volume is
-#   just a directory under ~/.local/share/containers/storage/volumes and grows
-#   until the underlying filesystem fills - there is no size field and no
-#   ReadWriteOnce enforcement. Monitor free space yourself; a full disk will
-#   corrupt Postgres. See the README "Security Notes" and "Troubleshooting".
-#
-# LIFECYCLE
-#   `systemctl --user stop litellm-postgres.service` does NOT delete this volume.
-#   Neither does removing the unit files. It is destroyed only by an explicit
-#   `podman volume rm litellm-pgdata` (which is what uninstall.sh --purge-data
-#   does, behind a typed confirmation prompt).
-# =============================================================================
-
+# The LiteLLM Postgres data directory: keys, teams, users, spend and the encrypted
+# provider credentials. A named volume, not a bind mount: podman initialises it with the
+# image's ownership (uid 70), which a rootless bind mount would get wrong.
+# VolumeName= keeps the name "litellm-pgdata" (Quadlet's default is systemd-<file>).
+# It has no size limit: watch the free space of ~/.local/share/containers.
+# Deleted only by scripts/uninstall.sh --purge, after a final pg_dump.
 [Unit]
 Description=Podman volume holding the LiteLLM Postgres data directory
 
 [Volume]
-# Explicit name -> `podman volume ls` shows "litellm-pgdata".
 VolumeName=litellm-pgdata
-
-# "local" is the default driver; stated for readability.
-Driver=local
-
 Label=app=litellm-postgres
 Label=io.woowtech.stack=litellm-gw
-Label=app.kubernetes.io/part-of=woow-litellm
-
-# NOTE: do NOT put systemd specifiers such as %N in VolumeName= - the Podman
-# man page warns that specifiers referencing the generated service unit break
-# Quadlet's ability to link resources together, because they expand differently
-# in each generated service. Plain literal names only.
+Label=io.woowtech.app=litellm
