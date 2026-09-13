@@ -80,7 +80,7 @@ ql_enable_linger
 ql_lock "$APP"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+ql_cleanup work rm -rf "$WORK"
 
 # ---- 2. per-host settings (D2: rendered from the env file at install time) -----------------
 ql_env_ensure "$EXAMPLE" "$ENV_FILE"
