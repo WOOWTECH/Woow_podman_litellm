@@ -1,0 +1,18 @@
+{
+ "python": "3.13",
+ "note": "X-FIX-CVE 2026-10-16：PyPI 官方 wheel，sha256 與 PyPI 公布值一致；升版請重新取得並更新本檔",
+ "packages": [
+  {
+   "name": "multidict",
+   "version": "6.9.1",
+   "wheel": "multidict-6.9.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "sha256": "7fd79c521f6290c69125fa2b85fa65d9e657e6a8ffaf722dc881b926bef4aa5c",
+   "machine": "x86_64",
+   "module": "multidict",
+   "source": "https://files.pythonhosted.org/packages/93/f2/e06c8e42074d0a4b8419bfe92afbd1d262190b69549ecbcd2dffa4f103c2/multidict-6.9.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+   "compiled_modules": [
+    "multidict._multidict"
+   ]
+  }
+ ]
+}

@@ -3,7 +3,7 @@
 #
 #   scripts/restore.sh <backup_dir> [--with-secrets] [--yes]
 #
-#   --with-secrets   also take LITELLM_SALT_KEY and LITELLM_MASTER_KEY from <backup_dir>/secrets.env
+#   --with-secrets   also take salt, master key and UI password from <backup_dir>/secrets.env
 #                    (needed when restoring onto another host or a fresh install: the dump's
 #                    provider credentials only decrypt with the salt key they were written with)
 #   --yes            do not ask for confirmation
@@ -96,6 +96,7 @@ if ((with_secrets)); then
   ql_warn "replacing litellm-salt-key with the backup's key: it belongs to the database just restored"
   ql_secret_ensure litellm-salt-key env:LITELLM_SALT_KEY --update
   if [[ -n ${QL_ENV[LITELLM_MASTER_KEY]:-} ]]; then ql_secret_ensure litellm-master-key env:LITELLM_MASTER_KEY --update; fi
+  if [[ -n ${QL_ENV[LITELLM_UI_PASSWORD]:-} ]]; then ql_secret_ensure litellm-ui-password env:LITELLM_UI_PASSWORD --update; fi
 fi
 
 systemctl --user start "$LL_UNIT"

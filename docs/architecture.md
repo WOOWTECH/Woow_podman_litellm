@@ -1,5 +1,7 @@
 # Architecture
 
+> Historical architecture for LiteLLM 1.83.14 / PostgreSQL 16. Current architecture: [README](../README.md) and [alignment](alignment.md).
+
 `WOOWTECH / Woow_podman_litellm` runs the same LiteLLM gateway that the existing
 k3s deployment runs, but on a single host under Podman. Two containers, one
 user-defined bridge network, one named volume for the database, one read-only

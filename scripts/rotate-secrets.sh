@@ -5,11 +5,11 @@
 #                                         Postgres container, then replace the secrets
 #                                         litellm-postgres-password and litellm-database-url and
 #                                         restart the proxy
-#   scripts/rotate-secrets.sh --master    new master key (the /v1 admin credential and the Admin
-#                                         UI password): replace litellm-master-key and restart
+#   scripts/rotate-secrets.sh --master    new /v1 master key: replace litellm-master-key and restart
 #                                         the proxy. EVERY CLIENT that uses the master key must
 #                                         be updated; virtual keys stored in the database are not
 #                                         affected
+#   scripts/rotate-secrets.sh --ui        new Admin UI password; revoke old dashboard sessions
 #   scripts/rotate-secrets.sh --salt      refused, with an explanation
 #
 #   --yes    do not ask for confirmation
@@ -28,14 +28,14 @@ LL_UNIT=litellm.service
 what='' yes=0
 while (($#)); do
   case $1 in
-    --db | --master | --salt) what=${1#--} ;;
+    --db | --master | --ui | --salt) what=${1#--} ;;
     --yes) yes=1 ;;
     -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
 done
-[[ -n $what ]] || ql_die "say what to rotate: --db, --master (or --salt for the explanation)"
+[[ -n $what ]] || ql_die "say what to rotate: --db, --master, --ui (or --salt for the explanation)"
 export QL_APP=$APP
 ql_require_rootless
 ql_require_user_systemd
@@ -102,7 +102,7 @@ if [[ $what == db ]]; then
     old=''
   fi
 elif [[ $what == master ]]; then
-  confirm "This changes the master key: every client using it, and the Admin UI login, must be updated"
+  confirm "This changes the master key: every client using it must be updated"
   # shellcheck disable=SC2034 # read by name (env:LITELLM_MASTER_NEW)
   LITELLM_MASTER_NEW="sk-$(rand_alnum 48)"
   ql_secret_ensure litellm-master-key env:LITELLM_MASTER_NEW --replace
@@ -111,6 +111,15 @@ elif [[ $what == master ]]; then
   systemctl --user restart "$LL_UNIT"
   ql_wait_container_healthy litellm 900 || ql_die "litellm did not become healthy after the rotation"
   ql_warn "read the new key with: podman secret inspect --showsecret --format '{{.SecretData}}' litellm-master-key"
+elif [[ $what == ui ]]; then
+  confirm "This changes the Admin UI password and revokes its old sessions"
+  # shellcheck disable=SC2034 # read by name through ql_secret_ensure env:LITELLM_UI_NEW
+  LITELLM_UI_NEW=$(rand_alnum 48)
+  ql_secret_ensure litellm-ui-password env:LITELLM_UI_NEW --replace
+  unset LITELLM_UI_NEW
+  systemctl --user restart "$LL_UNIT"
+  ql_wait_container_healthy litellm 900 || ql_die "litellm did not become healthy after UI password rotation"
+  ql_warn "read the new UI password with: podman secret inspect --showsecret --format '{{.SecretData}}' litellm-ui-password"
 fi
 
 "$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed after the rotation"

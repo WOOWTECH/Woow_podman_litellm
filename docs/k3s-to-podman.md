@@ -1,5 +1,7 @@
 # From k3s to Podman: How This Stack Was Translated
 
+> Historical migration analysis for LiteLLM 1.83.14 / PostgreSQL 16. Current package: [README](../README.md) and [alignment](alignment.md).
+
 **Repository:** `WOOWTECH/Woow_podman_litellm`
 **Subject:** deploying the WOOWTECH LiteLLM gateway on a single host with Podman, derived from the k3s manifests that run the same stack today.
 

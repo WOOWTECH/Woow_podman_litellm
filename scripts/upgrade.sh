@@ -22,6 +22,7 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 APP=litellm
 UNITS=(litellm-postgres.service litellm.service)
 KEEP_SNAPSHOTS=5
+LOCAL_IMAGE=localhost/woow-litellm:1.104.0-0.3.16
 
 backup=1
 while (($#)); do
@@ -40,6 +41,7 @@ STATE=${QL_STATE_ROOT:-$HOME/.local/state/woow-quadlet}/$APP
 
 # ---- 1. snapshot ------------------------------------------------------------------------------
 snap=$STATE/rollback/$(date +%Y%m%d-%H%M%S)
+old_local_image=$(podman image inspect --format '{{.Id}}' "$LOCAL_IMAGE" 2>/dev/null || true)
 (umask 077 && mkdir -p -- "$snap/files") || ql_die "cannot create $snap"
 cp -p -- "$STATE/manifest" "$snap/manifest"
 while read -r _ path; do
@@ -71,6 +73,9 @@ rollback() {
     cp -p -- "$snap/files$rel" "$rel"
   done < <(find "$snap/files" -type f -print0)
   cp -p -- "$snap/manifest" "$STATE/manifest"
+  if [[ -n $old_local_image ]]; then
+    podman tag "$old_local_image" "$LOCAL_IMAGE" || ql_warn "could not restore the previous local image tag"
+  fi
   rm -f -- "$STATE/pending-restart"
   systemctl --user daemon-reload
   systemctl --user restart "${UNITS[@]}" || ql_die "rollback: restart failed; see journalctl --user -u litellm -n 100"

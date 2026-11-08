@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily LiteLLM database backup
+
+[Timer]
+OnCalendar=*-*-* 19:00:00 UTC
+Persistent=true
+Unit=litellm-backup.service
+
+[Install]
+WantedBy=timers.target
