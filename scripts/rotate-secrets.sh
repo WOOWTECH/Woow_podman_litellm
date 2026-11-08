@@ -113,6 +113,7 @@ elif [[ $what == master ]]; then
   ql_warn "read the new key with: podman secret inspect --showsecret --format '{{.SecretData}}' litellm-master-key"
 elif [[ $what == ui ]]; then
   confirm "This changes the Admin UI password and revokes its old sessions"
+  # shellcheck disable=SC2034 # read by name through ql_secret_ensure env:LITELLM_UI_NEW
   LITELLM_UI_NEW=$(rand_alnum 48)
   ql_secret_ensure litellm-ui-password env:LITELLM_UI_NEW --replace
   unset LITELLM_UI_NEW

@@ -233,6 +233,7 @@ if [[ -n $UI_IN ]]; then
   ql_secret_ensure litellm-ui-password env:LITELLM_UI_PASSWORD --update
   ((QL_SECRET_CHANGED == 0)) || restart_ll=1
 elif ! secret_exists litellm-ui-password; then
+  # shellcheck disable=SC2034 # read by name through ql_secret_ensure env:LITELLM_UI_GEN
   LITELLM_UI_GEN=$(rand_alnum 48)
   ql_secret_ensure litellm-ui-password env:LITELLM_UI_GEN
   unset LITELLM_UI_GEN
