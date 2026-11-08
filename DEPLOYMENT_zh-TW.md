@@ -1,5 +1,7 @@
 # 部署指南
 
+> 舊版指南（LiteLLM 1.83.14／PostgreSQL 16）。目前版本請看 [README_zh-TW.md](README_zh-TW.md) 與 [docs/alignment.md](docs/alignment.md)。
+
 [`README.md`](README_zh-TW.md) 的長篇補充。本文只涵蓋一種部署形態：**rootless Podman + Quadlet +
 `systemd --user`**，由 `scripts/install.sh` 驅動。compose 已移除（見 README 的「Docker 與 compose」）。
 

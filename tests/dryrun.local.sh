@@ -21,17 +21,16 @@ else
   local_fail "the readiness gate (ExecStartPost= pg_isready -h 127.0.0.1 + Requires=) is missing"
 fi
 
-# config/config.yaml is shared byte-for-byte with Woow_k3s_litellm. Change both, then this pin.
-cfg_hash=$(git -C "$REPO" hash-object config/config.yaml)
-if [[ $cfg_hash == 4876702dde54e214d71fd6724a303c3f9c70fec6 ]]; then
-  local_ok "config/config.yaml matches the pinned k3s copy"
+# The PaaS model contract has no hard-coded provider keys or model slugs.
+if grep -qx 'model_list: \[\]' "$REPO/config/config.yaml"; then
+  local_ok "models are managed in the database"
 else
-  local_fail "config/config.yaml drifted from the pinned k3s copy (hash $cfg_hash)"
+  local_fail "config/config.yaml must not ship fixed models"
 fi
 
 # Pinned images only (STANDARD section 3): an exact version, no floating tag.
 while IFS= read -r img; do
-  if [[ $img =~ :v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[A-Za-z0-9.]+)?$ ]]; then local_ok "pinned $img"; else local_fail "not pinned: $img"; fi
+  if [[ $img =~ :[0-9]+\.[0-9]+(\.[0-9]+)?(-[A-Za-z0-9.]+)?(@sha256:[a-f0-9]{64})?$ ]]; then local_ok "pinned $img"; else local_fail "not pinned: $img"; fi
 done < <(sed -n 's/^Image=//p' "$REPO"/quadlet/*.container)
 
 # Loopback by default; no cloudflared anywhere (the k3s tunnel token must never be reused).

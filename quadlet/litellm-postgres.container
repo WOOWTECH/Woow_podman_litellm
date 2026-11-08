@@ -1,4 +1,4 @@
-# litellm-postgres: PostgreSQL 16 for the WOOWTECH LiteLLM gateway. Not published.
+# litellm-postgres: PostgreSQL 17 for the WOOWTECH LiteLLM gateway. Not published.
 #
 # Readiness gate: podman 4.9.3 silently ignores Notify=healthy (the generated unit gets
 # --sdnotify=conmon, so "started" means "container started"). ExecStartPost= below keeps
@@ -9,7 +9,7 @@
 # Least privilege: this container gets only its own password, as a secret file. The
 # provider, master and salt keys never reach it.
 [Unit]
-Description=PostgreSQL 16 for the WOOWTECH LiteLLM gateway
+Description=PostgreSQL 17 for the WOOWTECH LiteLLM gateway
 Documentation=https://github.com/WOOWTECH/Woow_podman_litellm
 # Park the unit in "failed" instead of hot-looping on a broken setup (podman has no
 # CrashLoopBackOff).
@@ -19,7 +19,7 @@ StartLimitBurst=5
 [Container]
 ContainerName=litellm-postgres
 # Pinned minor version (STANDARD section 3); upgrade = bump here, then scripts/upgrade.sh.
-Image=docker.io/library/postgres:16.15-alpine3.24
+Image=docker.io/library/postgres:17.11-alpine3.23@sha256:bc2701f9a79f9248bcb18743bc9b2c732d9a1d16737ca44a8f577752fc43b61f
 Network=litellm.network
 Volume=litellm-pgdata.volume:/var/lib/postgresql/data
 Environment=PGDATA=/var/lib/postgresql/data/pgdata

@@ -21,7 +21,7 @@
 #   litellm-database-url        derived from the password on every run
 #   litellm-master-key          generated once (sk-...), or imported from LITELLM_MASTER_KEY
 #   litellm-salt-key            generated once, or imported from LITELLM_SALT_KEY; NEVER replaced
-#   litellm-openrouter-api-key  from OPENROUTER_API_KEY; a blank value keeps the secret
+#   litellm-ui-password        generated once or imported; independent of the API master key
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -37,7 +37,7 @@ PG_CONTAINER=litellm-postgres
 LL_CONTAINER=litellm
 PG_UNIT=litellm-postgres.service
 LL_UNIT=litellm.service
-UNITS=("$PG_UNIT" "$LL_UNIT")
+UNITS=(litellm-network.service litellm-pgdata-volume.service "$PG_UNIT" "$LL_UNIT" litellm-backup.timer)
 VOLUME=litellm-pgdata
 QDIR=${QL_QUADLET_DIR:-$HOME/.config/containers/systemd}
 # ------------------------------------------------------------------------------------------
@@ -71,7 +71,6 @@ rand_alnum() {
   done
   printf '%s' "${s:0:$1}"
 }
-placeholder() { [[ -z $1 || $1 == *REPLACE_ME* ]]; }
 
 # ---- 1. host preflight ---------------------------------------------------------------------
 ql_preflight "$PODMAN_MIN"
@@ -94,9 +93,11 @@ setenv() { QL_DRY_RUN=0 ql_env_set "$envsrc" "$1" "$2"; }
 for kv in "${sets[@]}"; do
   [[ $kv == *=* ]] || ql_die "--set wants KEY=VALUE, got '$kv'"
   grep -q "^${kv%%=*}=" "$EXAMPLE" || ql_die "--set: ${kv%%=*} is not a setting of ${EXAMPLE##*/}"
-  case ${kv%%=*} in *_KEY) ql_die "--set ${kv%%=*}: put keys in $ENV_FILE (0600), not on the command line" ;; esac
+  case ${kv%%=*} in *_KEY|*_PASSWORD) ql_die "--set ${kv%%=*}: put credentials in $ENV_FILE (0600), not on the command line" ;; esac
   setenv "${kv%%=*}" "${kv#*=}"
 done
+if ! grep -q '^LITELLM_UI_USERNAME=' "$envsrc"; then setenv LITELLM_UI_USERNAME admin; fi
+if ! grep -q '^LITELLM_UI_PASSWORD=' "$envsrc"; then setenv LITELLM_UI_PASSWORD ''; fi
 ql_env_load "$envsrc"
 
 BIND=$(ql_env_get LITELLM_BIND)
@@ -105,22 +106,20 @@ ql_assert_match LITELLM_BIND "$BIND" '(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[
 ql_assert_match LITELLM_PORT "$PORT" '[1-9][0-9]{0,4}'
 ((PORT <= 65535)) || ql_die "LITELLM_PORT=$PORT is not a TCP port"
 ql_assert_match LITELLM_LOG "$(ql_env_get LITELLM_LOG)" 'DEBUG|INFO|WARNING|ERROR|CRITICAL'
+ql_assert_match LITELLM_UI_USERNAME "$(ql_env_get LITELLM_UI_USERNAME)" '[A-Za-z0-9._-]+'
 if [[ $BIND == 0.0.0.0 ]]; then
   ql_warn "LITELLM_BIND=0.0.0.0: the /v1 API and the Admin UI are reachable from every network; prefer a reverse proxy"
 elif [[ $BIND != 127.0.0.1 ]]; then
   ql_warn "LITELLM_BIND=$BIND: the /v1 API and the Admin UI are reachable from that network, not only from this host"
 fi
 
-OR_KEY=$(ql_env_get OPENROUTER_API_KEY '')
 MASTER_IN=$(ql_env_get LITELLM_MASTER_KEY '')
 SALT_IN=$(ql_env_get LITELLM_SALT_KEY '')
-if placeholder "$OR_KEY" && ! secret_exists litellm-openrouter-api-key; then
-  msg="OPENROUTER_API_KEY is not set in $ENV_FILE and the secret litellm-openrouter-api-key does not exist"
-  if [[ $DRY == 1 ]]; then ql_warn "$msg (a real install would stop here)"; else ql_die "$msg: put the key in that 0600 file and re-run"; fi
-fi
+UI_IN=$(ql_env_get LITELLM_UI_PASSWORD '')
 if [[ -n $MASTER_IN && ! $MASTER_IN =~ ^sk-[^[:space:]]{8,}$ ]]; then
   ql_die "LITELLM_MASTER_KEY in $ENV_FILE must start with sk- and have at least 8 more characters"
 fi
+if [[ -n $UI_IN && ${#UI_IN} -lt 12 ]]; then ql_die "LITELLM_UI_PASSWORD must have at least 12 characters"; fi
 if [[ -n $SALT_IN ]] && secret_exists litellm-salt-key; then
   current=$(podman secret inspect --showsecret --format '{{.SecretData}}' litellm-salt-key) || ql_die "cannot read secret litellm-salt-key"
   if [[ $current != "$SALT_IN" ]]; then
@@ -130,6 +129,9 @@ if [[ -n $SALT_IN ]] && secret_exists litellm-salt-key; then
   current=''
 fi
 if podman volume exists "$VOLUME" >/dev/null 2>&1; then
+  mountpoint=$(podman volume inspect --format '{{.Mountpoint}}' "$VOLUME")
+  pg_version=$(cat "$mountpoint/pgdata/PG_VERSION" 2>/dev/null || true)
+  [[ -z $pg_version || $pg_version == 17 ]] || ql_die "existing PostgreSQL volume is version $pg_version; PostgreSQL 17 cannot start on it. Use the dump-and-restore procedure in docs/alignment.md on a fresh host or Podman user"
   if ! secret_exists litellm-postgres-password; then
     ql_die "volume $VOLUME exists but the secret litellm-postgres-password does not: the database password is unknown. See README \"Troubleshooting\" (recreate the secret, then scripts/rotate-secrets.sh --db)."
   fi
@@ -155,6 +157,8 @@ fi
 mkdir -p "$WORK/src" "$WORK/out/config"
 cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/*.volume "$REPO"/quadlet/*.network "$WORK/src/"
 ql_render "$WORK/src" "$envsrc" "$REPO/quadlet/render-vars" "$WORK/out"
+cp -p "$REPO/quadlet/litellm-backup.timer" "$WORK/out/"
+printf '[Unit]\nDescription=Backup LiteLLM PostgreSQL\nRequires=litellm-postgres.service\nAfter=litellm-postgres.service\n[Service]\nType=oneshot\nExecStart=%s/scripts/backup.sh --daily\n' "$REPO" >"$WORK/out/litellm-backup.service"
 install -m 644 -- "$REPO/config/config.yaml" "$WORK/out/config/config.yaml"
 ql_dryrun "$WORK/out" --verify --ref-dir "$QDIR" || ql_die "the rendered units failed the dry-run; nothing was installed"
 for f in "$WORK/out"/*; do
@@ -169,6 +173,13 @@ if [[ $DRY != 1 ]] && ! cmp -s -- "$envsrc" "$ENV_FILE"; then
 fi
 
 # ---- 5. images and secrets, before any unit changes (a pull never runs inside a start timeout)
+if [[ $DRY != 1 && $no_pull == 0 ]]; then
+  old_image=$(podman image inspect --format '{{.Id}}' localhost/woow-litellm:1.104.0-0.3.16 2>/dev/null || true)
+  podman build -t localhost/woow-litellm:1.104.0-0.3.16 -f "$REPO/image/Dockerfile" "$REPO/image" \
+    || ql_die "LiteLLM image build failed; nothing was installed"
+  new_image=$(podman image inspect --format '{{.Id}}' localhost/woow-litellm:1.104.0-0.3.16)
+  [[ $new_image == "$old_image" ]] || image_changed=1
+fi
 if ((no_pull)); then
   mapfile -t images < <(sed -n 's/^Image=//p' "$WORK/out"/*.container)
   for img in "${images[@]}"; do
@@ -180,7 +191,7 @@ fi
 
 # Generated and derived values reach ql_secret_ensure as shell variables (env:NAME), which
 # it reads by name and pipes to `podman secret create -`: never argv, never printed.
-restart_ll=0
+restart_ll=${image_changed:-0}
 ql_secret_ensure litellm-postgres-password random:32
 if secret_exists litellm-postgres-password; then
   pw=$(podman secret inspect --showsecret --format '{{.SecretData}}' litellm-postgres-password) \
@@ -217,15 +228,18 @@ elif ! secret_exists litellm-salt-key; then
 else
   ql_secret_ensure litellm-salt-key random:48 # exists: only recorded for --purge
 fi
-if ! placeholder "$OR_KEY"; then
+if [[ -n $UI_IN ]]; then
   QL_SECRET_CHANGED=0
-  ql_secret_ensure litellm-openrouter-api-key env:OPENROUTER_API_KEY --update
+  ql_secret_ensure litellm-ui-password env:LITELLM_UI_PASSWORD --update
   ((QL_SECRET_CHANGED == 0)) || restart_ll=1
-elif secret_exists litellm-openrouter-api-key; then
-  ql_info "OPENROUTER_API_KEY is blank: keeping the secret litellm-openrouter-api-key"
-  ql_secret_ensure litellm-openrouter-api-key random:32 # exists: only recorded for --purge
+elif ! secret_exists litellm-ui-password; then
+  LITELLM_UI_GEN=$(rand_alnum 48)
+  ql_secret_ensure litellm-ui-password env:LITELLM_UI_GEN
+  unset LITELLM_UI_GEN
+else
+  ql_secret_ensure litellm-ui-password random:48
 fi
-OR_KEY='' MASTER_IN='' SALT_IN=''
+MASTER_IN='' SALT_IN='' UI_IN=''
 
 # ---- 6. install changed files, then start / restart only what changed -----------------------
 changed=$(ql_install_files "$WORK/out" "$APP" --prune)
@@ -236,11 +250,14 @@ if [[ $DRY == 1 ]]; then
 fi
 if grep -qx 'config/config.yaml' <<<"$changed"; then restart_ll=1; fi
 ((restart_ll == 0)) || ql_mark_changed "$APP" "$LL_UNIT"
+if ! podman network exists litellm-net >/dev/null 2>&1; then ql_mark_changed "$APP" litellm-network.service; fi
+if ! podman volume exists "$VOLUME" >/dev/null 2>&1; then ql_mark_changed "$APP" litellm-pgdata-volume.service; fi
 if ((no_start)); then
   systemctl --user daemon-reload
   ql_info "installed; not started (--no-start). Start with: systemctl --user start ${UNITS[*]}"
   exit 0
 fi
+systemctl --user reset-failed "$PG_UNIT" "$LL_UNIT" 2>/dev/null || true
 ql_apply_units "$APP" "${UNITS[@]}"
 
 # ---- 7. health and smoke -----------------------------------------------------------------------
@@ -258,10 +275,10 @@ cat >&2 <<EOF
 LiteLLM is installed and healthy.
 
   API          http://$BIND:$PORT/v1   (loopback: put a reverse proxy or tunnel on this host in front)
-  Admin UI     http://$BIND:$PORT/ui   user admin, password = the master key:
-               podman secret inspect --showsecret --format '{{.SecretData}}' litellm-master-key
+  Admin UI     http://$BIND:$PORT/ui   user $(ql_env_get LITELLM_UI_USERNAME), password secret:
+               podman secret inspect --showsecret --format '{{.SecretData}}' litellm-ui-password
   Salt key     never rotated; scripts/backup.sh writes it to secrets.env: keep a copy OFF this host
-  Keys         you may now blank OPENROUTER_API_KEY / LITELLM_*_KEY in $ENV_FILE (the secrets stay)
+  Keys         you may now blank LITELLM_*_KEY in $ENV_FILE (the secrets stay)
   Logs         journalctl --user -u $LL_UNIT -u $PG_UNIT -f
   Settings     $ENV_FILE (edit, then re-run $0)
 

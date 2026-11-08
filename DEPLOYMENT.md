@@ -1,5 +1,7 @@
 # Deployment Guide
 
+> Historical guide for LiteLLM 1.83.14 / PostgreSQL 16. Current instructions: [README.md](README.md) and [docs/alignment.md](docs/alignment.md).
+
 The long-form companion to [`README.md`](README.md). It covers one deployment shape: **rootless
 Podman + Quadlet + `systemd --user`**, driven by `scripts/install.sh`. Compose is gone (see
 README, "Docker and compose").

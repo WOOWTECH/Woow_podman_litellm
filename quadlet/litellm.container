@@ -7,7 +7,7 @@
 # Secrets are podman secrets created by install.sh; none is in this file, in the env file
 # after you blank it, or in config.yaml (which dereferences os.environ/NAME).
 [Unit]
-Description=LiteLLM proxy (WOOWTECH gateway, OpenRouter-backed)
+Description=LiteLLM proxy (WOOWTECH gateway)
 Documentation=https://github.com/WOOWTECH/Woow_podman_litellm
 Documentation=https://docs.litellm.ai/docs/proxy/prod
 # A real readiness gate: litellm-postgres only turns active after its ExecStartPost=
@@ -19,22 +19,27 @@ StartLimitBurst=5
 
 [Container]
 ContainerName=litellm
-# Same pinned tag as the k3s deployment (Woow_k3s_litellm): identical gateway behaviour.
-Image=ghcr.io/berriai/litellm:v1.83.14-stable
+# Built locally from the pinned 1.104.0 non-root image, reviewed HA patches and PaaS plugin.
+Image=localhost/woow-litellm:1.104.0-0.3.16
+Pull=never
 Network=litellm.network
 PublishPort=@@LITELLM_BIND@@:@@LITELLM_PORT@@:4000
 # One copy of config.yaml, installed by install.sh from config/config.yaml. ":Z" is a
 # private SELinux label (ignored on Ubuntu).
 Volume=%h/.config/litellm/config.yaml:/app/config.yaml:ro,Z
-# Arguments only: the image entrypoint ends in `exec litellm "$@"`. Never set Entrypoint=.
 Exec=--config /app/config.yaml --port 4000
 
 Secret=litellm-database-url,type=env,target=DATABASE_URL
 Secret=litellm-master-key,type=env,target=LITELLM_MASTER_KEY
+Secret=litellm-ui-password,type=env,target=UI_PASSWORD
+Secret=litellm-postgres-password,type=env,target=DATABASE_PASSWORD
 # Encrypts every provider credential stored in Postgres. Set once, never rotated; backed
 # up by scripts/backup.sh (secrets.env). Losing it makes those credentials unreadable.
 Secret=litellm-salt-key,type=env,target=LITELLM_SALT_KEY
-Secret=litellm-openrouter-api-key,type=env,target=OPENROUTER_API_KEY
+Environment=DATABASE_HOST=litellm-postgres
+Environment=DATABASE_NAME=litellm
+Environment=DATABASE_USERNAME=litellm
+Environment=UI_USERNAME=@@LITELLM_UI_USERNAME@@
 Environment=STORE_MODEL_IN_DB=True
 # Disables load_dotenv(): LiteLLM never auto-loads a stray local .env.
 Environment=LITELLM_MODE=PRODUCTION
@@ -42,7 +47,28 @@ Environment=LITELLM_LOG=@@LITELLM_LOG@@
 # Deliberately NOT the k3s value (true): this stack starts on an empty volume and runs
 # exactly one proxy, which must run the Prisma migrations itself. With true it would only
 # print the SQL, create no tables, and /health/readiness would never pass.
-Environment=DISABLE_SCHEMA_UPDATE=false
+Environment=DISABLE_SCHEMA_UPDATE=true
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+Environment=ROOT_REDIRECT_URL=/ui
+Environment=FORWARDED_ALLOW_IPS=127.0.0.1
+Environment=WOOW_CHATGPT_ENABLED=true
+Environment=CHATGPT_TOKEN_DIR=/run/woow-chatgpt
+Environment=PYTHONPATH=/opt/woow/plugin
+Environment=WOOW_UI_TOKEN_HTTPONLY=true
+Environment=WOOW_UI_SESSION_POLICY_VERSION=2
+Environment=WOOW_MAX_REQUEST_SIZE_MB=32
+Environment=WOOW_CHATGPT_DEFAULT_MODELS=visible
+Environment=WOOW_PROXY_PORT=4000
+Environment=WOOW_REASONING_MIN_OUTPUT_TOKENS=512
+Environment=WOOW_REASONING_MIN_OUTPUT_MODE=raise
+Environment=WOOW_FORWARD_RETRY_AFTER=true
+Environment=WOOW_UPSTREAM_TIMEOUT_STATUS=504
+Environment=WOOW_USAGE_LIMIT_COOLDOWN_MAX_SECONDS=900
+Environment=WOOW_UNPRICED_MODEL_MODE=warn
+Environment=DOCS_URL=/docs
+# Podman 4.9 does not accept uid/gid tmpfs mount options. Token files themselves
+# are created 0600 by the Woow plugin; this container runs only as uid 65534.
+PodmanArgs=--tmpfs=/run/woow-chatgpt:rw,size=64m,mode=1777
 
 # The image ships python but not curl. Startup probe (k8s startupProbe): readiness is
 # DB-aware and covers the first Prisma migration; 40 x 15 s = 10 minutes of grace.

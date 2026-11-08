@@ -50,12 +50,10 @@ check "GET /health/readiness -> 200 (database connected)" test "$(code "$BASE/he
 check "GET /v1/models without a key -> 401" test "$(code "$BASE/v1/models")" = 401
 
 models=$(with_key "$BASE/v1/models" || true)
-mapfile -t want < <(sed -n 's/^[[:space:]]*- model_name:[[:space:]]*//p' "$REPO/config/config.yaml")
-got=$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]*"' <<<"$models" | sed -E 's/.*"([^"]*)"$/\1/' | sort | tr '\n' ' ')
-missing=()
-for m in "${want[@]}"; do [[ " $got" == *" $m "* ]] || missing+=("$m"); done
-check "GET /v1/models with the master key lists the ${#want[@]} config.yaml models (got: ${got:-nothing})" \
-  test "${#want[@]}" -gt 0 -a "${#missing[@]}" -eq 0
+check "GET /v1/models with the master key returns a model list" \
+  grep -q '"data"' <<<"$models"
+check "ChatGPT account API requires admin login" \
+  test "$(code "$BASE/woow/chatgpt/api/accounts")" = 401
 
 listeners=$(ss -ltnH "sport = :$PORT" 2>/dev/null | awk '{print $4}' | sort -u | tr '\n' ' ')
 check "port $PORT listens only on $BIND:$PORT (got: ${listeners:-none})" test "${listeners% }" = "$BIND:$PORT"
