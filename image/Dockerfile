@@ -9,7 +9,10 @@ RUN set -eu; \
       apply_api_errors apply_upstream_guard apply_m4_batch1 \
       apply_stream_slot_release apply_chatgpt_system_role; do \
       python -I "/opt/woow/patches/${patch}.py"; \
-    done
+    done; \
+    install -d -m 0555 /run/woow; \
+    printf 'enabled\n' > /run/woow/chatgpt-subscription; \
+    chmod 0444 /run/woow/chatgpt-subscription
 COPY overlay/ /opt/woow/overlay/
 RUN python -I /opt/woow/overlay/wheel_overlay.py apply \
       --lock /opt/woow/overlay/overlay.lock.json --wheels /opt/woow/overlay/wheels \

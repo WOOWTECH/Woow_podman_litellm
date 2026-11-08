@@ -54,6 +54,8 @@ check "GET /v1/models with the master key returns a model list" \
   grep -q '"data"' <<<"$models"
 check "ChatGPT account API requires admin login" \
   test "$(code "$BASE/woow/chatgpt/api/accounts")" = 401
+check "ChatGPT deployment policy enables subscription models and honors disable flag" \
+  podman exec litellm python -c 'import os; from litellm.woow_subscription_policy import deployment_enabled; p={"model":"chatgpt/gpt-5"}; assert deployment_enabled(p); os.environ["WOOW_CHATGPT_ENABLED"]="false"; assert not deployment_enabled(p)'
 
 listeners=$(ss -ltnH "sport = :$PORT" 2>/dev/null | awk '{print $4}' | sort -u | tr '\n' ' ')
 check "port $PORT listens only on $BIND:$PORT (got: ${listeners:-none})" test "${listeners% }" = "$BIND:$PORT"

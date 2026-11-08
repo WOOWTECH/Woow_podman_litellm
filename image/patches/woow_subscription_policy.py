@@ -1,4 +1,5 @@
-"""HA runtime deployment policy; no plugin import, routes, or persistent writes."""
+"""Runtime deployment policy; no plugin import, routes, or persistent writes."""
+import os
 from pathlib import Path
 
 POLICY_PATH = Path('/run/woow/chatgpt-subscription')
@@ -23,8 +24,10 @@ def deployment_enabled(params):
         is_subscription = isinstance(model, str) and model.startswith('chatgpt/')
     if not is_subscription:
         return True
-    # init-woow-env writes this root-owned tmpfs file before LiteLLM starts.
-    # Missing/unreadable/invalid policy fails closed for subscription deployments.
+    # The Podman image includes the root-owned flag; the runtime setting can still
+    # disable ChatGPT without rebuilding the image. Missing/invalid policy fails closed.
+    if os.environ.get('WOOW_CHATGPT_ENABLED') != 'true':
+        return False
     try:
         return POLICY_PATH.read_bytes() == b'enabled\n'
     except OSError:

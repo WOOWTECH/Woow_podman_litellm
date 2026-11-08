@@ -13,7 +13,7 @@ This Podman package was compared with:
 | Python dependency repair | Hash-locked `multidict` 6.9.1 wheel overlay | PaaS `paas-odoo-ci/litellm/overlay/` at `5c41784675314062fee49bc1f47ad61249b725df` |
 | Woow plugin | Exact nine locked files plus session revocation | PaaS `charts/litellm/files/`, HA `woow-plugin.lock.json` |
 | Models and keys | Empty `model_list`; Admin UI and PostgreSQL own tenant models and provider credentials | PaaS `templates/configmap.yaml` |
-| ChatGPT accounts | Multi-account login and routing; DB copy restored into tmpfs before HTTP starts | PaaS `woow_chatgpt.py`, `woow_chatgpt_plugin.py` |
+| ChatGPT accounts | Multi-account login and routing; DB copy restored into tmpfs before HTTP starts; root-owned deployment flag baked into the Podman image and gated by `WOOW_CHATGPT_ENABLED` | PaaS `woow_chatgpt.py`, `woow_chatgpt_plugin.py`; HA subscription policy adapted for Podman |
 | Admin authentication | Independent master key and UI password, default username `admin`; session revocation and HttpOnly cookie hardening | PaaS `woow_revoke_ui_sessions.py`, `woow_ui_cookie_hardening.py` |
 | Spend and API behaviour | 90-day retention, no prompts/responses in spend logs, SSE pings, no server retries, 90-second upstream timeout, 32 MiB request cap | PaaS `values.yaml`, `templates/configmap.yaml` |
 | Database | PostgreSQL 17.11 with one persistent volume; salt key copied into DB and checked on startup | PaaS `templates/scripts-configmap.yaml`, `postgresql.image` |
