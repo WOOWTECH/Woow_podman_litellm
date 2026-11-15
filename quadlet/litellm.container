@@ -75,7 +75,9 @@ PodmanArgs=--tmpfs=/run/woow-chatgpt:rw,size=64m,mode=1777
 HealthStartupCmd=python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/readiness').status==200 else 1)"
 HealthStartupInterval=15s
 HealthStartupTimeout=10s
-HealthStartupRetries=40
+# The installer also runs probes: an attempt count is not elapsed startup time.
+# Keep the installer's 900s deadline and regular post-start liveness checks.
+HealthStartupRetries=0
 HealthStartupSuccess=1
 # Liveness (k3s timings 20 s / 10 s / 6). Never probe plain /health: it calls every
 # configured model upstream and costs money on every interval.
